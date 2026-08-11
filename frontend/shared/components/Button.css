@@ -1,0 +1,71 @@
+.kyc-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+  line-height: 1.2;
+}
+
+.kyc-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.kyc-button--primary {
+  background: var(--color-accent);
+  color: #ffffff;
+}
+
+.kyc-button--primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.kyc-button--secondary {
+  background: var(--color-surface);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.kyc-button--secondary:hover:not(:disabled) {
+  background: var(--color-bg);
+}
+
+.kyc-button--danger {
+  background: var(--color-surface);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.kyc-button--danger:hover:not(:disabled) {
+  background: var(--color-danger-bg);
+}
+
+.kyc-button--ghost {
+  background: transparent;
+  color: var(--color-text-secondary);
+}
+
+.kyc-button--ghost:hover:not(:disabled) {
+  background: var(--color-bg);
+}
+
+.kyc-button__spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: kyc-spin 700ms linear infinite;
+}
+
+@keyframes kyc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

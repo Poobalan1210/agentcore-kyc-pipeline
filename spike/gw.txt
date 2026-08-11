@@ -1,0 +1,120 @@
+====================================================================================
+CreateGateway  POST /gateways/
+------------------------------------------------------------------------------------
+  name * : string
+  description : string
+  clientToken : string
+  roleArn * : string
+  protocolType * : string
+    enum: ['MCP']
+  protocolConfiguration : structure
+    mcp : structure
+      supportedVersions : list
+      instructions : string
+      searchType : string
+        enum: ['SEMANTIC']
+  authorizerType * : string
+    enum: ['CUSTOM_JWT', 'AWS_IAM', 'NONE']
+  authorizerConfiguration : structure
+    customJWTAuthorizer : structure
+      discoveryUrl * : string
+      allowedAudience : list
+      allowedClients : list
+      allowedScopes : list
+      customClaims : list
+        inboundTokenClaimName * : string
+        inboundTokenClaimValueType * : string
+          enum: ['STRING', 'STRING_ARRAY']
+        authorizingClaimMatchValue * : structure
+          ...
+  kmsKeyArn : string
+  customTransformConfiguration : structure
+    lambda : structure
+      arn : string
+  interceptorConfigurations : list
+    interceptor * : structure
+      lambda : structure
+        arn * : string
+    interceptionPoints * : list
+    inputConfiguration : structure
+      passRequestHeaders * : boolean
+  policyEngineConfiguration : structure
+    arn * : string
+    mode * : string
+      enum: ['LOG_ONLY', 'ENFORCE']
+  exceptionLevel : string
+    enum: ['DEBUG']
+  tags : map
+====================================================================================
+CreateGatewayTarget  POST /gateways/{gatewayIdentifier}/targets/
+------------------------------------------------------------------------------------
+  gatewayIdentifier * : string
+  name * : string
+  description : string
+  clientToken : string
+  targetConfiguration * : structure
+    mcp : structure
+      openApiSchema : structure
+        s3 : structure
+          uri : string
+          bucketOwnerAccountId : string
+        inlinePayload : string
+      smithyModel : structure
+        s3 : structure
+          uri : string
+          bucketOwnerAccountId : string
+        inlinePayload : string
+      lambda : structure
+        lambdaArn * : string
+        toolSchema * : structure
+          s3 : structure
+            uri : string
+            bucketOwnerAccountId : string
+          inlinePayload : list
+            ...
+      mcpServer : structure
+        endpoint * : string
+      apiGateway : structure
+        restApiId * : string
+        stage * : string
+        apiGatewayToolConfiguration * : structure
+          toolOverrides : list
+            ...
+          toolFilters * : list
+            ...
+  credentialProviderConfigurations : list
+    credentialProviderType * : string
+      enum: ['GATEWAY_IAM_ROLE', 'OAUTH', 'API_KEY']
+    credentialProvider : structure
+      oauthCredentialProvider : structure
+        providerArn * : string
+        scopes * : list
+          ...
+        customParameters : map
+          ...
+        grantType : string
+          enum: ['CLIENT_CREDENTIALS', 'AUTHORIZATION_CODE']
+        defaultReturnUrl : string
+      apiKeyCredentialProvider : structure
+        providerArn * : string
+        credentialParameterName : string
+        credentialPrefix : string
+        credentialLocation : string
+          enum: ['HEADER', 'QUERY_PARAMETER']
+  metadataConfiguration : structure
+    allowedRequestHeaders : list
+    allowedQueryParameters : list
+    allowedResponseHeaders : list
+====================================================================================
+CreatePolicyEngine  POST /policy-engines
+------------------------------------------------------------------------------------
+  name * : string
+  description : string
+  clientToken : string
+  encryptionKeyArn : string
+  tags : map
+
+====================================================================================
+CloudFormation support for AgentCore resource types
+====================================================================================
+AgentCore CFN resource types: ['AWS::BedrockAgentCore::ApiKeyCredentialProvider', 'AWS::BedrockAgentCore::Browser', 'AWS::BedrockAgentCore::BrowserCustom', 'AWS::BedrockAgentCore::BrowserProfile', 'AWS::BedrockAgentCore::CodeInterpreter', 'AWS::BedrockAgentCore::CodeInterpreterCustom', 'AWS::BedrockAgentCore::ConfigurationBundle', 'AWS::BedrockAgentCore::ConfigurationBundleVersion', 'AWS::BedrockAgentCore::Dataset', 'AWS::BedrockAgentCore::Evaluator', 'AWS::BedrockAgentCore::Gateway', 'AWS::BedrockAgentCore::GatewayRateLimit', 'AWS::BedrockAgentCore::GatewayRule', 'AWS::BedrockAgentCore::GatewayTarget', 'AWS::BedrockAgentCore::Harness', 'AWS::BedrockAgentCore::HarnessEndpoint', 'AWS::BedrockAgentCore::HarnessVersion', 'AWS::BedrockAgentCore::Memory', 'AWS::BedrockAgentCore::OAuth2CredentialProvider', 'AWS::BedrockAgentCore::OnlineEvaluationConfig', 'AWS::BedrockAgentCore::PaymentConnector', 'AWS::BedrockAgentCore::PaymentCredentialProvider', 'AWS::BedrockAgentCore::PaymentManager', 'AWS::BedrockAgentCore::Policy', 'AWS::BedrockAgentCore::PolicyEngine', 'AWS::BedrockAgentCore::PolicyGeneration', 'AWS::BedrockAgentCore::ResourcePolicy', 'AWS::BedrockAgentCore::Runtime', 'AWS::BedrockAgentCore::RuntimeEndpoint', 'AWS::BedrockAgentCore::TokenVault', 'AWS::BedrockAgentCore::WorkloadIdentity']

@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "projectName": "kycspike",
+  "targetName": "default",
+  "targetRegion": "us-east-1",
+  "resources": [
+    {
+      "resourceType": "harness",
+      "name": "kyc_spike_fraud",
+      "deploymentState": "deployed",
+      "identifier": "arn:aws:bedrock-agentcore:us-east-1:633898796092:harness/kycspike_kyc_spike_fraud-wFNik3Ok0E"
+    }
+  ],
+  "deployedState": {
+    "targets": {
+      "default": {
+        "resources": {
+          "harnesses": {
+            "kyc_spike_fraud": {
+              "harnessId": "kycspike_kyc_spike_fraud-wFNik3Ok0E",
+              "harnessArn": "arn:aws:bedrock-agentcore:us-east-1:633898796092:harness/kycspike_kyc_spike_fraud-wFNik3Ok0E",
+              "roleArn": "arn:aws:iam::633898796092:role/kycspike_kyc_spike_fraud",
+              "status": "CREATING",
+              "configHash": "f1bb8be7fd1e7a77"
+            }
+          },
+          "stackName": "AgentCore-kycspike-default",
+          "deployHash": "98f6a41d33b28765"
+        }
+      }
+    }
+  },
+  "logPath": "agentcore/.cli/logs/status/status-20260809-131142.log"
+}

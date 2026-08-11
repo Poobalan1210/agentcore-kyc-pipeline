@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
+  "name": "kycspike",
+  "version": 1,
+  "managedBy": "CDK",
+  "tags": {
+    "agentcore:created-by": "agentcore-cli",
+    "agentcore:project-name": "kycspike"
+  },
+  "runtimes": [],
+  "memories": [],
+  "credentials": [],
+  "evaluators": [],
+  "onlineEvalConfigs": [],
+  "agentCoreGateways": [],
+  "policyEngines": [],
+  "configBundles": [],
+  "abTests": [],
+  "httpGateways": [],
+  "harnesses": [
+    {
+      "name": "kyc_spike_fraud",
+      "path": "app/kyc_spike_fraud"
+    }
+  ],
+  "datasets": [],
+  "payments": []
+}

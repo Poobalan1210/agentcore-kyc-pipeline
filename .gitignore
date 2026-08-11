@@ -1,0 +1,53 @@
+# --- secrets / environment ---------------------------------------------------
+# Real values (Cognito pool IDs, API URLs) — copy from the matching .env.local.example
+.env
+.env.*
+!.env.local.example
+!*.env.example
+
+# --- CDK ------------------------------------------------------------------
+infra/cdk.out/
+infra/cdk.out.*/
+infra/cdk-outputs*.json
+cdk.context.json
+
+# --- account-specific debug/verification artifacts (real ARNs/account IDs, no secrets,
+# but not something to publish either — regenerate locally as needed) -----------------
+infra/verify_harnesses.json
+spike/*.json
+spike/*.log
+*.outputs.json
+
+# --- Cedar policies generated at deploy stage 2 (not source, regenerated) ----
+policies/generated/
+
+# --- Python -----------------------------------------------------------------
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Node / frontend ----------------------------------------------------------
+node_modules/
+frontend/**/dist/
+*.tsbuildinfo
+
+# --- demo assets that are generated, not source ------------------------------
+demo-assets/generated/
+
+# --- real personal photos dropped in for demo document generation (your own face,
+# not synthetic — keep it local, never push it to a shared repo) --------------------
+demo-assets/photos/*.jpg
+demo-assets/photos/*.jpeg
+demo-assets/photos/*.png
+!demo-assets/photos/README.md
+
+# --- OS / editor ------------------------------------------------------------
+.DS_Store
+*.swp
+
+# --- logs / scratch -----------------------------------------------------------
+*.log

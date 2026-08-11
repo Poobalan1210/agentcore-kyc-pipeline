@@ -1,0 +1,18 @@
+/*
+ * Overrides for Amplify UI's default theme — same tokens as the applicant app's login screen
+ * (task 14.6), so the two apps' only shared third-party surface (`Authenticator`) matches the
+ * neutral design system rather than Amplify's default purple/teal palette.
+ */
+
+[data-amplify-authenticator] {
+  --amplify-colors-brand-primary-80: var(--color-accent);
+  --amplify-colors-brand-primary-90: var(--color-accent-hover);
+  --amplify-colors-brand-primary-100: var(--color-accent-hover);
+  --amplify-colors-font-primary: var(--color-text);
+  --amplify-colors-background-primary: var(--color-bg);
+  --amplify-fonts-default-static: var(--font-sans);
+  --amplify-fonts-default-variable: var(--font-sans);
+  display: flex;
+  justify-content: center;
+  padding: var(--space-8) 0;
+}

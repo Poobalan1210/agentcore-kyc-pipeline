@@ -1,0 +1,41 @@
+{
+  "name": "kyc90-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev:applicant": "vite --config apps/applicant/vite.config.ts",
+    "dev:reviewer": "vite --config apps/reviewer/vite.config.ts",
+    "dev:demo": "vite --config apps/demo/vite.config.ts",
+    "build:applicant": "tsc -b apps/applicant && vite build --config apps/applicant/vite.config.ts",
+    "build:reviewer": "tsc -b apps/reviewer && vite build --config apps/reviewer/vite.config.ts",
+    "build:demo": "tsc -b apps/demo && vite build --config apps/demo/vite.config.ts",
+    "build": "npm run build:applicant && npm run build:reviewer && npm run build:demo",
+    "test": "vitest run",
+    "lint": "eslint . --ext ts,tsx"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0",
+    "aws-amplify": "^6.6.4",
+    "@aws-amplify/ui-react": "^6.5.4",
+    "@aws-amplify/ui-react-liveness": "^3.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "vitest": "^2.1.4",
+    "@testing-library/react": "^16.0.1",
+    "@testing-library/jest-dom": "^6.6.3",
+    "jsdom": "^25.0.1",
+    "eslint": "^8.57.1",
+    "@typescript-eslint/eslint-plugin": "^8.13.0",
+    "@typescript-eslint/parser": "^8.13.0",
+    "eslint-plugin-react-hooks": "^5.0.0"
+  }
+}

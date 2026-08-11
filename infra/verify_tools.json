@@ -1,0 +1,112 @@
+[
+  {
+    "check": "sanctions_exact_match responds with an envelope",
+    "pass": true,
+    "detail": "status=OK reason_code=None"
+  },
+  {
+    "check": "sanctions_fuzzy responds with an envelope",
+    "pass": true,
+    "detail": "status=OK reason_code=None"
+  },
+  {
+    "check": "pep_lookup responds with an envelope",
+    "pass": true,
+    "detail": "status=OK reason_code=None"
+  },
+  {
+    "check": "adverse_media responds with an envelope",
+    "pass": true,
+    "detail": "status=OK reason_code=None"
+  },
+  {
+    "check": "velocity_check responds with an envelope",
+    "pass": true,
+    "detail": "status=OK reason_code=None"
+  },
+  {
+    "check": "s3_get_document responds with an envelope",
+    "pass": true,
+    "detail": "status=INVALID reason_code=DOCUMENT_NOT_FOUND"
+  },
+  {
+    "check": "rekognition_compare_faces responds with an envelope",
+    "pass": true,
+    "detail": "status=UNAVAILABLE reason_code=REKOGNITION_UNAVAILABLE"
+  },
+  {
+    "check": "sanctions_exact_match: UNAVAILABLE when source is down",
+    "pass": true,
+    "detail": "status=UNAVAILABLE"
+  },
+  {
+    "check": "sanctions_exact_match: reports no verdict while unavailable",
+    "pass": true,
+    "detail": "data keys=[]"
+  },
+  {
+    "check": "sanctions_fuzzy: UNAVAILABLE when source is down",
+    "pass": true,
+    "detail": "status=UNAVAILABLE"
+  },
+  {
+    "check": "sanctions_fuzzy: reports no verdict while unavailable",
+    "pass": true,
+    "detail": "data keys=[]"
+  },
+  {
+    "check": "pep_lookup: UNAVAILABLE when source is down",
+    "pass": true,
+    "detail": "status=UNAVAILABLE"
+  },
+  {
+    "check": "pep_lookup: reports no verdict while unavailable",
+    "pass": true,
+    "detail": "data keys=[]"
+  },
+  {
+    "check": "adverse_media: UNAVAILABLE when source is down",
+    "pass": true,
+    "detail": "status=UNAVAILABLE"
+  },
+  {
+    "check": "adverse_media: reports no verdict while unavailable",
+    "pass": true,
+    "detail": "data keys=[]"
+  },
+  {
+    "check": "DEMO_PROFILE is off",
+    "pass": true,
+    "detail": "off"
+  },
+  {
+    "check": "DEMO_LATENCY_MS is 0",
+    "pass": true,
+    "detail": "0"
+  },
+  {
+    "check": "provisional account opens",
+    "pass": true,
+    "detail": "{'status': 'OK', 'operation': 'applyRestrictions', 'result': 'VERIFY-1"
+  },
+  {
+    "check": "exactly five restrictions applied",
+    "pass": true,
+    "detail": "5: ['CASH_WITHDRAWAL_LIMIT', 'CUMULATIVE_DEPOSIT_CEILING', 'INTERNATIONAL_TRANSFERS_BLOCKED', 'PRODUCT_UPGRADES_BLOCKED', 'THIRD_PARTY_PAYMENTS_BLOCKED']"
+  },
+  {
+    "check": "international transfer is refused",
+    "pass": true,
+    "detail": "{'allowed': False, 'refused_by': 'INTERNATIONAL_TRANSFERS_BLOCKED', 'reason': 'i"
+  },
+  {
+    "check": "refusal names the restriction",
+    "pass": true,
+    "detail": "INTERNATIONAL_TRANSFERS_BLOCKED"
+  },
+  {
+    "check": "deposit over the ceiling is refused",
+    "pass": true,
+    "detail": "DEPOSIT_CEILING_EXCEEDED"
+  }
+]

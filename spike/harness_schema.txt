@@ -1,0 +1,314 @@
+=== definitions available ===
+[
+ "AuthorizerConfiguration",
+ "AuthorizingClaimMatchValueType",
+ "ClaimMatchValueType",
+ "ContainerConfiguration",
+ "CustomClaimValidationType",
+ "CustomJWTAuthorizerConfiguration",
+ "EfsAccessPointConfiguration",
+ "FilesystemConfiguration",
+ "HarnessAgentCoreBrowserConfig",
+ "HarnessAgentCoreCodeInterpreterConfig",
+ "HarnessAgentCoreGatewayConfig",
+ "HarnessAgentCoreMemoryConfiguration",
+ "HarnessAgentCoreMemoryRetrievalConfig",
+ "HarnessAgentCoreRuntimeEnvironment",
+ "HarnessBedrockModelConfig",
+ "HarnessDisabledMemoryConfiguration",
+ "HarnessEnvironmentArtifact",
+ "HarnessEnvironmentProvider",
+ "HarnessGatewayOutboundAuth",
+ "HarnessGeminiModelConfig",
+ "HarnessInlineFunctionConfig",
+ "HarnessLiteLlmModelConfig",
+ "HarnessManagedMemoryConfiguration",
+ "HarnessMemoryConfiguration",
+ "HarnessModelConfiguration",
+ "HarnessOpenAiModelConfig",
+ "HarnessRemoteMcpConfig",
+ "HarnessSkill",
+ "HarnessSkillAwsSkillsSource",
+ "HarnessSkillGitAuth",
+ "HarnessSkillGitSource",
+ "HarnessSkillS3Source",
+ "HarnessSlidingWindowConfiguration",
+ "HarnessStatus",
+ "HarnessSummarizationConfiguration",
+ "HarnessSystemContentBlock",
+ "HarnessTool",
+ "HarnessToolConfiguration",
+ "HarnessTruncationConfiguration",
+ "HarnessTruncationStrategyConfiguration",
+ "LifecycleConfiguration",
+ "ManagedVpcResource",
+ "NetworkConfiguration",
+ "OAuthCredentialProvider",
+ "PrivateEndpoint",
+ "PrivateEndpointOverride",
+ "S3FilesAccessPointConfiguration",
+ "SelfManagedLatticeResource",
+ "SessionStorageConfiguration",
+ "Tag",
+ "VpcConfig"
+]
+
+--- HarnessBedrockModelConfig ---
+{
+  "type": "object",
+  "properties": {
+    "ModelId": {
+      "type": "string"
+    },
+    "MaxTokens": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "Temperature": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "TopP": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "ApiFormat": {
+      "type": "string",
+      "enum": [
+        "converse_stream",
+        "responses",
+        "chat_completions"
+      ]
+    },
+    "AdditionalParams": {
+      "type": "object",
+      "description": "Provider-specific parameters passed through to the model provider unchanged.",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[\\s\\S]{1,256}$": {}
+      }
+    }
+  },
+  "required": [
+    "ModelId"
+  ],
+  "additionalProperties": false
+}
+
+--- HarnessAgentCoreGatewayConfig ---
+{
+  "type": "object",
+  "properties": {
+    "GatewayArn": {
+      "type": "string",
+      "pattern": "^arn:aws(|-cn|-us-gov):bedrock-agentcore:[a-z0-9-]{1,20}:[0-9]{12}:gateway/([0-9a-z][-]?){1,48}-[a-z0-9]{10}$"
+    },
+    "OutboundAuth": {
+      "$ref": "#/definitions/HarnessGatewayOutboundAuth"
+    }
+  },
+  "required": [
+    "GatewayArn"
+  ],
+  "additionalProperties": false
+}
+
+--- HarnessAgentCoreCodeInterpreterConfig ---
+{
+  "type": "object",
+  "properties": {
+    "CodeInterpreterArn": {
+      "type": "string",
+      "pattern": "^arn:aws(-[^:]+)?:bedrock-agentcore:[a-z0-9-]+:(aws|[0-9]{12}):code-interpreter(-custom)?/(aws\\.codeinterpreter\\.v1|[a-zA-Z][a-zA-Z0-9_]{0,47}-[a-zA-Z0-9]{10})$"
+    }
+  },
+  "additionalProperties": false
+}
+
+--- HarnessMemoryConfiguration ---
+{
+  "type": "object",
+  "properties": {
+    "AgentCoreMemoryConfiguration": {
+      "$ref": "#/definitions/HarnessAgentCoreMemoryConfiguration"
+    },
+    "ManagedMemoryConfiguration": {
+      "$ref": "#/definitions/HarnessManagedMemoryConfiguration"
+    },
+    "Disabled": {
+      "$ref": "#/definitions/HarnessDisabledMemoryConfiguration"
+    }
+  },
+  "additionalProperties": false
+}
+
+--- HarnessTool ---
+{
+  "type": "object",
+  "properties": {
+    "Type": {
+      "type": "string",
+      "enum": [
+        "remote_mcp",
+        "agentcore_browser",
+        "agentcore_gateway",
+        "inline_function",
+        "agentcore_code_interpreter"
+      ]
+    },
+    "Name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-zA-Z0-9_-]+$"
+    },
+    "Config": {
+      "$ref": "#/definitions/HarnessToolConfiguration"
+    }
+  },
+  "required": [
+    "Type"
+  ],
+  "additionalProperties": false
+}
+
+--- HarnessTruncationConfiguration ---
+{
+  "type": "object",
+  "properties": {
+    "Strategy": {
+      "type": "string",
+      "enum": [
+        "sliding_window",
+        "summarization",
+        "none"
+      ]
+    },
+    "Config": {
+      "$ref": "#/definitions/HarnessTruncationStrategyConfiguration"
+    }
+  },
+  "required": [
+    "Strategy"
+  ],
+  "additionalProperties": false
+}
+
+--- HarnessSkill ---
+{
+  "type": "object",
+  "properties": {
+    "Path": {
+      "type": "string",
+      "description": "The filesystem path to the skill definition.",
+      "minLength": 1
+    },
+    "S3": {
+      "$ref": "#/definitions/HarnessSkillS3Source"
+    },
+    "Git": {
+      "$ref": "#/definitions/HarnessSkillGitSource"
+    },
+    "AwsSkills": {
+      "$ref": "#/definitions/HarnessSkillAwsSkillsSource"
+    }
+  },
+  "additionalProperties": false
+}
+
+--- property SystemPrompt ---
+{
+  "type": "array",
+  "description": "The system prompt that defines the agent's behavior.",
+  "items": {
+    "$ref": "#/definitions/HarnessSystemContentBlock"
+  }
+}
+
+--- property Tools ---
+{
+  "type": "array",
+  "description": "The tools available to the agent.",
+  "items": {
+    "$ref": "#/definitions/HarnessTool"
+  }
+}
+
+--- property AllowedTools ---
+{
+  "type": "array",
+  "description": "The tools that the agent is allowed to use.",
+  "items": {
+    "type": "string",
+    "minLength": 1,
+    "maxLength": 64,
+    "pattern": "^(\\*|@?[^/]+(/[^/]+)?)$"
+  }
+}
+
+--- property Memory ---
+{
+  "$ref": "#/definitions/HarnessMemoryConfiguration",
+  "description": "The AgentCore Memory configuration for persisting conversation context."
+}
+
+--- property Skills ---
+{
+  "type": "array",
+  "description": "The skills available to the agent.",
+  "items": {
+    "$ref": "#/definitions/HarnessSkill"
+  }
+}
+
+--- property MaxIterations ---
+{
+  "type": "integer",
+  "description": "The maximum number of iterations the agent loop can execute per invocation."
+}
+
+--- property MaxTokens ---
+{
+  "type": "integer",
+  "description": "The maximum number of tokens the agent can generate per iteration."
+}
+
+--- property TimeoutSeconds ---
+{
+  "type": "integer",
+  "description": "The maximum duration in seconds for the agent loop execution per invocation."
+}
+
+--- property EnvironmentVariables ---
+{
+  "type": "object",
+  "description": "Environment variables to set in the harness runtime environment.",
+  "patternProperties": {
+    "^[\\s\\S]*$": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 5000
+    }
+  },
+  "additionalProperties": false,
+  "maxProperties": 50
+}
+
+--- property Tags ---
+{
+  "type": "array",
+  "description": "Tags to apply to the harness resource.",
+  "items": {
+    "$ref": "#/definitions/Tag"
+  },
+  "maxItems": 50,
+  "insertionOrder": false
+}
+
+--- property AuthorizerConfiguration ---
+{
+  "$ref": "#/definitions/AuthorizerConfiguration",
+  "description": "The inbound authorization configuration for authenticating incoming requests."
+}

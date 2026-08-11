@@ -1,0 +1,125 @@
+.kyc-trace {
+  margin-top: var(--space-5);
+}
+
+.kyc-trace__tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: var(--space-4);
+}
+
+.kyc-trace__tab {
+  background: none;
+  border: none;
+  padding: var(--space-2) var(--space-3);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.kyc-trace__tab--active {
+  color: var(--color-text);
+  border-bottom-color: var(--color-accent);
+}
+
+.kyc-trace__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.kyc-trace__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 13px;
+}
+
+.kyc-trace__row:last-child {
+  border-bottom: none;
+}
+
+.kyc-trace__row dt {
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.kyc-trace__row dd {
+  margin: 0;
+  text-align: right;
+  font-family: var(--font-mono);
+  word-break: break-word;
+}
+
+.kyc-trace__agent {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.kyc-trace__agent-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.kyc-trace__agent-body {
+  padding: var(--space-3);
+  background: var(--color-bg);
+  border-top: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+.kyc-trace__timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.kyc-trace__step {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.kyc-trace__step-name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.kyc-trace__step-duration {
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.kyc-trace__empty {
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  padding: var(--space-4) 0;
+}

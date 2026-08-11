@@ -1,0 +1,19 @@
+/*
+ * Overrides for Amplify UI's default theme, so `Authenticator` and `FaceLivenessDetector` match
+ * the shared design tokens (task 14.5) instead of Amplify's own out-of-the-box purple/teal
+ * palette — the professional/neutral look extends to the third-party components too, not only
+ * the ones built from scratch.
+ */
+
+[data-amplify-authenticator] {
+  --amplify-colors-brand-primary-80: var(--color-accent);
+  --amplify-colors-brand-primary-90: var(--color-accent-hover);
+  --amplify-colors-brand-primary-100: var(--color-accent-hover);
+  --amplify-colors-font-primary: var(--color-text);
+  --amplify-colors-background-primary: var(--color-bg);
+  --amplify-fonts-default-static: var(--font-sans);
+  --amplify-fonts-default-variable: var(--font-sans);
+  display: flex;
+  justify-content: center;
+  padding: var(--space-8) 0;
+}

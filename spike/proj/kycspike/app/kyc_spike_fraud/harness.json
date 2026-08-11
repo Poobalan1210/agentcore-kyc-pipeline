@@ -1,0 +1,18 @@
+{
+  "name": "kyc_spike_fraud",
+  "model": {
+    "provider": "bedrock",
+    "modelId": "us.amazon.nova-2-lite-v1:0",
+    "apiFormat": "converse_stream"
+  },
+  "systemPrompt": "You are a KYC fraud analyst. Reply with a single JSON object only.",
+  "tools": [],
+  "skills": [],
+  "maxIterations": 5,
+  "maxTokens": 512,
+  "timeoutSeconds": 120,
+  "lifecycleConfig": {
+    "idleRuntimeSessionTimeout": 120,
+    "maxLifetime": 900
+  }
+}

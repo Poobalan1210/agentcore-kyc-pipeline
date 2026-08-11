@@ -1,0 +1,309 @@
+============================================================================================
+AWS::BedrockAgentCore::GatewayTarget
+============================================================================================
+top-level properties: {
+  "AuthorizationData": {
+    "$ref": "#/definitions/AuthorizationData"
+  },
+  "CreatedAt": {
+    "type": "string",
+    "format": "date-time"
+  },
+  "CredentialProviderConfigurations": {
+    "type": "array",
+    "items": {
+      "$ref": "#/definitions/CredentialProviderConfiguration"
+    },
+    "maxItems": 1,
+    "minItems": 1
+  },
+  "Description": {
+    "type": "string",
+    "maxLength": 200,
+    "minLength": 1
+  },
+  "GatewayArn": {
+    "type": "string",
+    "pattern": "^arn:aws(|-cn|-us-gov):bedrock-agentcore:[a-z0-9-]{1,20}:[0-9]{12}:gateway/([0-9a-z][-]?){1,48}-[a-z0-9]{10}$"
+  },
+  "Gat
+
+-- definition: TargetConfiguration
+{
+  "oneOf": [
+    {
+      "type": "object",
+      "title": "Mcp",
+      "properties": {
+        "Mcp": {
+          "$ref": "#/definitions/McpTargetConfiguration"
+        }
+      },
+      "required": [
+        "Mcp"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "title": "Http",
+      "properties": {
+        "Http": {
+          "$ref": "#/definitions/HttpTargetConfiguration"
+        }
+      },
+      "required": [
+        "Http"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "title": "Inference",
+      "properties": {
+        "Inference": {
+          "$ref": "#/definitions/InferenceTargetConfiguration"
+        }
+      },
+      "required": [
+        "Inference"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
+
+-- definition: McpTargetConfiguration
+{
+  "oneOf": [
+    {
+      "type": "object",
+      "title": "OpenApiSchema",
+      "properties": {
+        "OpenApiSchema": {
+          "$ref": "#/definitions/ApiSchemaConfiguration"
+        }
+      },
+      "required": [
+        "OpenApiSchema"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "title": "SmithyModel",
+      "properties": {
+        "SmithyModel": {
+          "$ref": "#/definitions/ApiSchemaConfiguration"
+        }
+      },
+      "required": [
+        "SmithyModel"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "title": "Lambda",
+      "properties": {
+        "Lambda": {
+          "$ref": "#/definitions/McpLambdaTargetConfiguration"
+        }
+      },
+      "required": [
+        "Lambda"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "title": "McpServer",
+      "properties": {
+        "McpServer": {
+          "$ref": "#/definitions/McpServerTargetConfiguration"
+        }
+      },
+      "required": [
+        "McpServer"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "title": "ApiGateway",
+      "properties": {
+        "ApiGateway": {
+          "$ref": "#/definitions/ApiGatewayTargetConfiguration"
+        }
+      },
+      "required": [
+        "ApiGateway"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "title": "Connector",
+      "properties": {
+        "Connector": {
+          "$ref": "#/definitions/ConnectorTargetConfiguration"
+        }
+      },
+      "required": [
+        "Connector"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
+
+-- definition: McpLambdaTargetConfiguration
+{
+  "type": "object",
+  "properties": {
+    "LambdaArn": {
+      "type": "string",
+      "maxLength": 170,
+      "minLength": 1,
+      "pattern": "^arn:(aws[a-zA-Z-]*)?:lambda:([a-z]{2}(-gov)?-[a-z]+-\\d{1}):(\\d{12}):function:([a-zA-Z0-9-_.]+)(:(\\$LATEST|[a-zA-Z0-9-_]+))?$"
+    },
+    "ToolSchema": {
+      "$ref": "#/definitions/ToolSchema"
+    }
+  },
+  "required": [
+    "LambdaArn",
+    "ToolSchema"
+  ],
+  "additionalProperties": false
+}
+
+-- definition: ToolSchema
+{
+  "oneOf": [
+    {
+      "type": "object",
+      "title": "S3",
+      "properties": {
+        "S3": {
+          "$ref": "#/definitions/S3Configuration"
+        }
+      },
+      "required": [
+        "S3"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "title": "InlinePayload",
+      "properties": {
+        "InlinePayload": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ToolDefinition"
+          }
+        }
+      },
+      "required": [
+        "InlinePayload"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}
+
+-- definition: ToolDefinition
+{
+  "type": "object",
+  "properties": {
+    "Name": {
+      "type": "string"
+    },
+    "Description": {
+      "type": "string"
+    },
+    "InputSchema": {
+      "$ref": "#/definitions/SchemaDefinition"
+    },
+    "OutputSchema": {
+      "$ref": "#/definitions/SchemaDefinition"
+    }
+  },
+  "required": [
+    "Description",
+    "InputSchema",
+    "Name"
+  ],
+  "additionalProperties": false
+}
+
+-- definition: CredentialProviderConfiguration
+{
+  "type": "object",
+  "properties": {
+    "CredentialProviderType": {
+      "$ref": "#/definitions/CredentialProviderType"
+    },
+    "CredentialProvider": {
+      "$ref": "#/definitions/CredentialProvider"
+    }
+  },
+  "required": [
+    "CredentialProviderType"
+  ],
+  "additionalProperties": false
+}
+============================================================================================
+AWS::BedrockAgentCore::GatewayRateLimit
+============================================================================================
+top-level properties: {
+  "CreatedAt": {
+    "type": "string",
+    "format": "date-time"
+  },
+  "Description": {
+    "type": "string",
+    "maxLength": 512,
+    "minLength": 0,
+    "description": "Optional human-readable description for this limit."
+  },
+  "DimensionKeys": {
+    "type": "array",
+    "items": {
+      "type": "string",
+      "maxLength": 80,
+      "minLength": 1,
+      "pattern": "^(targetName|toolName|qualifiedModelId|\\$\\.context\\.iam\\.principal|\\$\\.context\\.iam\\.sourceIdentity|\\$\\.context\\.jwt\\.[a-zA-Z_][a-zA-Z0-9_\\-\\.]{0,61}[a-zA-Z0-9_])$",
+      "description": "A dimension key speci
+
+-- Entries NOT FOUND. similar: []
+
+-- RateLimitEntry NOT FOUND. similar: []
+
+-- DimensionKeys NOT FOUND. similar: []
+
+-- DimensionKey NOT FOUND. similar: []
+
+-- Requests NOT FOUND. similar: []
+
+-- RequestsLimit NOT FOUND. similar: []
+
+-- definition: Dimensions
+{
+  "type": "object",
+  "maxProperties": 10,
+  "minProperties": 1,
+  "description": "Map of dimension name to dimension value for a rule entry",
+  "patternProperties": {
+    "^(targetName|toolName|qualifiedModelId|\\$\\.context\\.iam\\.principal|\\$\\.context\\.iam\\.sourceIdentity|\\$\\.context\\.jwt\\.[a-zA-Z_][a-zA-Z0-9_\\-\\.]{0,61}[a-zA-Z0-9_])$": {
+      "type": "string",
+      "maxLength": 256,
+      "minLength": 1,
+      "description": "A dimension value in a rule entry (exact value or \"*\" wildcard)"
+    }
+  },
+  "additionalProperties": false
+}
+
+-- Dimension NOT FOUND. similar: ['Dimensions']

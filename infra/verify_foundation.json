@@ -1,0 +1,307 @@
+[
+  {
+    "check": "us: Object Lock enabled",
+    "pass": true,
+    "detail": "Enabled"
+  },
+  {
+    "check": "us: COMPLIANCE mode",
+    "pass": true,
+    "detail": "COMPLIANCE"
+  },
+  {
+    "check": "us: 7-year retention",
+    "pass": true,
+    "detail": "2555 days"
+  },
+  {
+    "check": "us: probe object written",
+    "pass": true,
+    "detail": "version FXkhiH97L4P1"
+  },
+  {
+    "check": "us: DELETE of locked version is refused",
+    "pass": true,
+    "detail": "AccessDenied"
+  },
+  {
+    "check": "us: delete marker allowed (object still retained)",
+    "pass": true,
+    "detail": "expected \u2014 versioned delete marker, not a deletion"
+  },
+  {
+    "check": "uk: Object Lock enabled",
+    "pass": true,
+    "detail": "Enabled"
+  },
+  {
+    "check": "uk: COMPLIANCE mode",
+    "pass": true,
+    "detail": "COMPLIANCE"
+  },
+  {
+    "check": "uk: 7-year retention",
+    "pass": true,
+    "detail": "2555 days"
+  },
+  {
+    "check": "uk: probe object written",
+    "pass": true,
+    "detail": "version FgPlN6bxiKiQ"
+  },
+  {
+    "check": "uk: DELETE of locked version is refused",
+    "pass": true,
+    "detail": "AccessDenied"
+  },
+  {
+    "check": "uk: delete marker allowed (object still retained)",
+    "pass": true,
+    "detail": "expected \u2014 versioned delete marker, not a deletion"
+  },
+  {
+    "check": "au: Object Lock enabled",
+    "pass": true,
+    "detail": "Enabled"
+  },
+  {
+    "check": "au: COMPLIANCE mode",
+    "pass": true,
+    "detail": "COMPLIANCE"
+  },
+  {
+    "check": "au: 7-year retention",
+    "pass": true,
+    "detail": "2555 days"
+  },
+  {
+    "check": "au: probe object written",
+    "pass": true,
+    "detail": "version Czv67ObhjdIo"
+  },
+  {
+    "check": "au: DELETE of locked version is refused",
+    "pass": true,
+    "detail": "AccessDenied"
+  },
+  {
+    "check": "au: delete marker allowed (object still retained)",
+    "pass": true,
+    "detail": "expected \u2014 versioned delete marker, not a deletion"
+  },
+  {
+    "check": "jp: Object Lock enabled",
+    "pass": true,
+    "detail": "Enabled"
+  },
+  {
+    "check": "jp: COMPLIANCE mode",
+    "pass": true,
+    "detail": "COMPLIANCE"
+  },
+  {
+    "check": "jp: 7-year retention",
+    "pass": true,
+    "detail": "2555 days"
+  },
+  {
+    "check": "jp: probe object written",
+    "pass": true,
+    "detail": "version 8vlbKP0iwPSz"
+  },
+  {
+    "check": "jp: DELETE of locked version is refused",
+    "pass": true,
+    "detail": "AccessDenied"
+  },
+  {
+    "check": "jp: delete marker allowed (object still retained)",
+    "pass": true,
+    "detail": "expected \u2014 versioned delete marker, not a deletion"
+  },
+  {
+    "check": "biometric bucket has NO Object Lock",
+    "pass": true,
+    "detail": "ObjectLockConfigurationNotFoundError"
+  },
+  {
+    "check": "biometric lifecycle deletes within 24h",
+    "pass": true,
+    "detail": "expiration days=[1]"
+  },
+  {
+    "check": "biometric object can be deleted immediately",
+    "pass": true,
+    "detail": "delete succeeded"
+  },
+  {
+    "check": "kyc90-harness-router: denies InvokeAgentRuntimeCommand",
+    "pass": true,
+    "detail": "explicit Deny present"
+  },
+  {
+    "check": "kyc90-harness-router: denies sts:AssumeRole",
+    "pass": true,
+    "detail": "R23.6"
+  },
+  {
+    "check": "kyc90-harness-router: model access is scoped, not '*'",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "kyc90-harness-documents: denies InvokeAgentRuntimeCommand",
+    "pass": true,
+    "detail": "explicit Deny present"
+  },
+  {
+    "check": "kyc90-harness-documents: denies sts:AssumeRole",
+    "pass": true,
+    "detail": "R23.6"
+  },
+  {
+    "check": "kyc90-harness-documents: model access is scoped, not '*'",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "kyc90-harness-identity: denies InvokeAgentRuntimeCommand",
+    "pass": true,
+    "detail": "explicit Deny present"
+  },
+  {
+    "check": "kyc90-harness-identity: denies sts:AssumeRole",
+    "pass": true,
+    "detail": "R23.6"
+  },
+  {
+    "check": "kyc90-harness-identity: model access is scoped, not '*'",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "kyc90-harness-fraud: denies InvokeAgentRuntimeCommand",
+    "pass": true,
+    "detail": "explicit Deny present"
+  },
+  {
+    "check": "kyc90-harness-fraud: denies sts:AssumeRole",
+    "pass": true,
+    "detail": "R23.6"
+  },
+  {
+    "check": "kyc90-harness-fraud: model access is scoped, not '*'",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "kyc90-harness-prescreen: denies InvokeAgentRuntimeCommand",
+    "pass": true,
+    "detail": "explicit Deny present"
+  },
+  {
+    "check": "kyc90-harness-prescreen: denies sts:AssumeRole",
+    "pass": true,
+    "detail": "R23.6"
+  },
+  {
+    "check": "kyc90-harness-prescreen: model access is scoped, not '*'",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "kyc90-harness-compliance: denies InvokeAgentRuntimeCommand",
+    "pass": true,
+    "detail": "explicit Deny present"
+  },
+  {
+    "check": "kyc90-harness-compliance: denies sts:AssumeRole",
+    "pass": true,
+    "detail": "R23.6"
+  },
+  {
+    "check": "kyc90-harness-compliance: model access is scoped, not '*'",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "kyc90-harness-notify: denies InvokeAgentRuntimeCommand",
+    "pass": true,
+    "detail": "explicit Deny present"
+  },
+  {
+    "check": "kyc90-harness-notify: denies sts:AssumeRole",
+    "pass": true,
+    "detail": "R23.6"
+  },
+  {
+    "check": "kyc90-harness-notify: model access is scoped, not '*'",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "gateway: grants InvokeGuardrailChecks (F-35)",
+    "pass": true,
+    "detail": "without it guardrail policies silently do nothing"
+  },
+  {
+    "check": "statemachine: grants InvokeAgentRuntime (F-70)",
+    "pass": true,
+    "detail": "the action the SFN integration authorises against"
+  },
+  {
+    "check": "statemachine: does NOT grant InvokeAgentRuntimeCommand",
+    "pass": true,
+    "detail": "R11.7 \u2014 bypasses allowedTools"
+  },
+  {
+    "check": "case table PK/SK",
+    "pass": true,
+    "detail": "{'applicantId': 'HASH', 'sk': 'RANGE'}"
+  },
+  {
+    "check": "both GSIs present",
+    "pass": true,
+    "detail": "{'phase2Pending-index', 'state-index'}"
+  },
+  {
+    "check": "SSE with customer-managed key",
+    "pass": true,
+    "detail": "KMS"
+  },
+  {
+    "check": "deletion protection on",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "point-in-time recovery enabled",
+    "pass": true,
+    "detail": "ENABLED"
+  },
+  {
+    "check": "kms alias evidence-us",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "kms alias evidence-uk",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "kms alias evidence-au",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "kms alias evidence-jp",
+    "pass": true,
+    "detail": ""
+  },
+  {
+    "check": "kms alias reasoning-traces",
+    "pass": true,
+    "detail": "distinct from evidence keys (R18.8)"
+  }
+]

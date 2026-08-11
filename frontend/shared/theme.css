@@ -1,0 +1,237 @@
+/*
+ * Shared design tokens — task 14.5/14.6/14.7.
+ *
+ * Deliberately restrained: a neutral grey/ink palette with one accent colour, no gradients, no
+ * decorative shadows beyond a single low-elevation card shadow. This is an operational tool for
+ * a bank's compliance workflow and an applicant's identity verification flow, not a marketing
+ * site — the visual language should read as precise and quiet rather than as a demo.
+ */
+
+:root {
+  /* Neutrals — the majority of the interface. */
+  --color-bg: #f7f8fa;
+  --color-surface: #ffffff;
+  --color-border: #d9dce1;
+  --color-border-strong: #b7bcc4;
+  --color-text: #1a1d21;
+  --color-text-secondary: #5b6270;
+  --color-text-tertiary: #8a8f99;
+
+  /* One accent, used sparingly: primary actions and links only. */
+  --color-accent: #1f4fd8;
+  --color-accent-hover: #1a41b4;
+  --color-accent-subtle: #eaf0fd;
+
+  /* Status colours — desaturated, not traffic-light bright. */
+  --color-success: #1c7c4c;
+  --color-success-bg: #e9f6ee;
+  --color-warning: #9a6300;
+  --color-warning-bg: #fdf3e0;
+  --color-danger: #b3261e;
+  --color-danger-bg: #fbe9e7;
+  --color-info: #1f4fd8;
+  --color-info-bg: #eaf0fd;
+
+  /* Elevation: one shadow, one radius scale. */
+  --shadow-card: 0 1px 2px rgba(16, 18, 22, 0.06), 0 1px 1px rgba(16, 18, 22, 0.04);
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  /* Type scale. System font stack — no webfont request adds latency to a KYC flow. */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", "Consolas", "Liberation Mono", monospace;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-8: 48px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: 22px;
+}
+
+h2 {
+  font-size: 17px;
+}
+
+h3 {
+  font-size: 14px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+
+p {
+  margin: 0;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font-family: inherit;
+}
+
+/* Focus visibility — WCAG 2.1 AA (R32.11). A 2px outline offset from the element, never
+   removed, since this application is not permitted to trade accessibility for aesthetics. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------- shared form/flow utilities */
+
+.kyc-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-4);
+}
+
+.kyc-form-row label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.kyc-form-row select,
+.kyc-form-row input,
+input[type="file"] {
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.kyc-hint {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin: var(--space-3) 0;
+  line-height: 1.5;
+}
+
+.kyc-error-text {
+  font-size: 13px;
+  color: var(--color-danger);
+  margin: var(--space-2) 0;
+}
+
+.kyc-document-list {
+  list-style: none;
+  margin: var(--space-3) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.kyc-document-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.kyc-document-list li span {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kyc-remove-link {
+  background: none;
+  border: none;
+  color: var(--color-danger);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.kyc-liveness-frame {
+  max-width: 480px;
+  margin: 0 auto;
+}
+
+.kyc-liveness-error {
+  text-align: center;
+  padding: var(--space-6) 0;
+}
+
+.kyc-progress {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-6) 0;
+}
+
+.kyc-progress__spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--color-border);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: kyc-spin 900ms linear infinite;
+}
+
+.kyc-progress__elapsed {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  font-family: var(--font-mono);
+}
+
+.kyc-result-description {
+  margin: var(--space-3) 0 var(--space-4);
+  line-height: 1.5;
+}
+
+@keyframes kyc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

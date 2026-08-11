@@ -1,0 +1,184 @@
+{
+  "gatewayArns": {
+    "US": "arn:aws:bedrock-agentcore:us-east-1:633898796092:gateway/kycgateway-us-rnl1romalk",
+    "UK": "arn:aws:bedrock-agentcore:us-east-1:633898796092:gateway/kycgateway-uk-lgzy4zxwew",
+    "AU": "arn:aws:bedrock-agentcore:us-east-1:633898796092:gateway/kycgateway-au-oa8bewwyrd",
+    "JP": "arn:aws:bedrock-agentcore:us-east-1:633898796092:gateway/kycgateway-jp-zlua2nxxjy"
+  },
+  "cedarActions": [
+    "AdverseMedia___adverse_media",
+    "DocumentStore___s3_get_document",
+    "FaceCompare___rekognition_compare_faces",
+    "PepList___pep_lookup",
+    "SanctionsExact___sanctions_exact_match",
+    "SanctionsFuzzy___sanctions_fuzzy",
+    "VelocityStore___velocity_check"
+  ],
+  "checks": [
+    {
+      "check": "four Gateways exist",
+      "pass": true,
+      "detail": "KycGateway-AU, KycGateway-JP, KycGateway-UK, KycGateway-US"
+    },
+    {
+      "check": "four policy engines exist",
+      "pass": true,
+      "detail": "kyc90_policy_au, kyc90_policy_jp, kyc90_policy_uk, kyc90_policy_us"
+    },
+    {
+      "check": "KycGateway-US READY",
+      "pass": true,
+      "detail": "READY"
+    },
+    {
+      "check": "KycGateway-US authorizer is AWS_IAM",
+      "pass": true,
+      "detail": "AWS_IAM"
+    },
+    {
+      "check": "KycGateway-US search type SEMANTIC",
+      "pass": true,
+      "detail": "SEMANTIC"
+    },
+    {
+      "check": "KycGateway-US policy engine attached LOG_ONLY",
+      "pass": true,
+      "detail": "mode=LOG_ONLY"
+    },
+    {
+      "check": "KycGateway-US has all seven targets",
+      "pass": true,
+      "detail": "7"
+    },
+    {
+      "check": "KycGateway-US all targets READY",
+      "pass": true,
+      "detail": "[]"
+    },
+    {
+      "check": "KycGateway-UK READY",
+      "pass": true,
+      "detail": "READY"
+    },
+    {
+      "check": "KycGateway-UK authorizer is AWS_IAM",
+      "pass": true,
+      "detail": "AWS_IAM"
+    },
+    {
+      "check": "KycGateway-UK search type SEMANTIC",
+      "pass": true,
+      "detail": "SEMANTIC"
+    },
+    {
+      "check": "KycGateway-UK policy engine attached LOG_ONLY",
+      "pass": true,
+      "detail": "mode=LOG_ONLY"
+    },
+    {
+      "check": "KycGateway-UK has all seven targets",
+      "pass": true,
+      "detail": "7"
+    },
+    {
+      "check": "KycGateway-UK all targets READY",
+      "pass": true,
+      "detail": "[]"
+    },
+    {
+      "check": "KycGateway-AU READY",
+      "pass": true,
+      "detail": "READY"
+    },
+    {
+      "check": "KycGateway-AU authorizer is AWS_IAM",
+      "pass": true,
+      "detail": "AWS_IAM"
+    },
+    {
+      "check": "KycGateway-AU search type SEMANTIC",
+      "pass": true,
+      "detail": "SEMANTIC"
+    },
+    {
+      "check": "KycGateway-AU policy engine attached LOG_ONLY",
+      "pass": true,
+      "detail": "mode=LOG_ONLY"
+    },
+    {
+      "check": "KycGateway-AU has all seven targets",
+      "pass": true,
+      "detail": "7"
+    },
+    {
+      "check": "KycGateway-AU all targets READY",
+      "pass": true,
+      "detail": "[]"
+    },
+    {
+      "check": "KycGateway-JP READY",
+      "pass": true,
+      "detail": "READY"
+    },
+    {
+      "check": "KycGateway-JP authorizer is AWS_IAM",
+      "pass": true,
+      "detail": "AWS_IAM"
+    },
+    {
+      "check": "KycGateway-JP search type SEMANTIC",
+      "pass": true,
+      "detail": "SEMANTIC"
+    },
+    {
+      "check": "KycGateway-JP policy engine attached LOG_ONLY",
+      "pass": true,
+      "detail": "mode=LOG_ONLY"
+    },
+    {
+      "check": "KycGateway-JP has all seven targets",
+      "pass": true,
+      "detail": "7"
+    },
+    {
+      "check": "KycGateway-JP all targets READY",
+      "pass": true,
+      "detail": "[]"
+    },
+    {
+      "check": "action name has exactly three underscores between parts",
+      "pass": true,
+      "detail": "AdverseMedia___adverse_media"
+    },
+    {
+      "check": "action name has exactly three underscores between parts",
+      "pass": true,
+      "detail": "DocumentStore___s3_get_document"
+    },
+    {
+      "check": "action name has exactly three underscores between parts",
+      "pass": true,
+      "detail": "FaceCompare___rekognition_compare_faces"
+    },
+    {
+      "check": "action name has exactly three underscores between parts",
+      "pass": true,
+      "detail": "PepList___pep_lookup"
+    },
+    {
+      "check": "action name has exactly three underscores between parts",
+      "pass": true,
+      "detail": "SanctionsExact___sanctions_exact_match"
+    },
+    {
+      "check": "action name has exactly three underscores between parts",
+      "pass": true,
+      "detail": "SanctionsFuzzy___sanctions_fuzzy"
+    },
+    {
+      "check": "action name has exactly three underscores between parts",
+      "pass": true,
+      "detail": "VelocityStore___velocity_check"
+    }
+  ]
+}

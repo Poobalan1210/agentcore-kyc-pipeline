@@ -1,0 +1,73 @@
+============================================================================================
+AWS::BedrockAgentCore::PolicyEngine
+--------------------------------------------------------------------------------------------
+  Name           pattern=^[A-Za-z][A-Za-z0-9_]*$  min=1 max=48
+       NO  kyc90-policy-us
+       ok  kyc90_policy_us
+       NO  KycGateway-US
+       ok  KycGatewayUS
+       NO  kyc90-harness-router
+       ok  kyc90_harness_router
+       ok  DocumentStore
+       ok  v3
+============================================================================================
+AWS::BedrockAgentCore::Policy
+--------------------------------------------------------------------------------------------
+  Name           pattern=^[A-Za-z][A-Za-z0-9_]*$  min=1 max=48
+       NO  kyc90-policy-us
+       ok  kyc90_policy_us
+       NO  KycGateway-US
+       ok  KycGatewayUS
+       NO  kyc90-harness-router
+       ok  kyc90_harness_router
+       ok  DocumentStore
+       ok  v3
+============================================================================================
+AWS::BedrockAgentCore::Gateway
+--------------------------------------------------------------------------------------------
+  Name           pattern=^([0-9a-zA-Z][-]?){1,48}$  min=None max=None
+       ok  kyc90-policy-us
+       NO  kyc90_policy_us
+       ok  KycGateway-US
+       ok  KycGatewayUS
+       ok  kyc90-harness-router
+       NO  kyc90_harness_router
+       ok  DocumentStore
+       ok  v3
+============================================================================================
+AWS::BedrockAgentCore::GatewayTarget
+--------------------------------------------------------------------------------------------
+  Name           pattern=^([0-9a-zA-Z][-]?){1,100}$  min=None max=None
+       ok  kyc90-policy-us
+       NO  kyc90_policy_us
+       ok  KycGateway-US
+       ok  KycGatewayUS
+       ok  kyc90-harness-router
+       NO  kyc90_harness_router
+       ok  DocumentStore
+       ok  v3
+============================================================================================
+AWS::BedrockAgentCore::Harness
+--------------------------------------------------------------------------------------------
+  HarnessName    pattern=^[a-zA-Z][a-zA-Z0-9_]{0,39}$  min=None max=None
+       NO  kyc90-policy-us
+       ok  kyc90_policy_us
+       NO  KycGateway-US
+       ok  KycGatewayUS
+       NO  kyc90-harness-router
+       ok  kyc90_harness_router
+       ok  DocumentStore
+       ok  v3
+============================================================================================
+AWS::BedrockAgentCore::HarnessEndpoint
+--------------------------------------------------------------------------------------------
+  HarnessName    pattern=None  min=None max=None
+  EndpointName   pattern=^[a-zA-Z][a-zA-Z0-9_]{0,47}$  min=None max=None
+       NO  kyc90-policy-us
+       ok  kyc90_policy_us
+       NO  KycGateway-US
+       ok  KycGatewayUS
+       NO  kyc90-harness-router
+       ok  kyc90_harness_router
+       ok  DocumentStore
+       ok  v3

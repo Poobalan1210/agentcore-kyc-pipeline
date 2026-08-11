@@ -1,0 +1,152 @@
+============================================================================================
+AWS::BedrockAgentCore::Gateway   (version None)
+--------------------------------------------------------------------------------------------
+  required   : ['AuthorizerType', 'Name', 'RoleArn']
+  createOnly : []
+  readOnly   : ['CreatedAt', 'GatewayArn', 'GatewayIdentifier', 'GatewayUrl', 'Status', 'StatusReasons', 'UpdatedAt', 'WorkloadIdentityDetails']
+  properties :
+     AuthorizerConfiguration            $ref->AuthorizerConfiguration
+     AuthorizerType                     $ref->AuthorizerType *
+     CreatedAt                          string    
+     Description                        string    
+     ExceptionLevel                     $ref->ExceptionLevel
+     GatewayArn                         string    
+     GatewayIdentifier                  string    
+     GatewayUrl                         string    
+     InterceptorConfigurations          array     
+     KmsKeyArn                          string    
+     Name                               string     *
+     PolicyEngineConfiguration          $ref->GatewayPolicyEngineConfiguration
+     ProtocolConfiguration              $ref->GatewayProtocolConfiguration
+     ProtocolType                       $ref->?   
+     RoleArn                            string     *
+     Status                             $ref->GatewayStatus
+     StatusReasons                      array     
+     Tags                               $ref->TagsMap
+     UpdatedAt                          string    
+     WorkloadIdentityDetails            $ref->WorkloadIdentityDetails
+============================================================================================
+AWS::BedrockAgentCore::GatewayTarget   (version None)
+--------------------------------------------------------------------------------------------
+  required   : ['TargetConfiguration']
+  createOnly : ['GatewayIdentifier']
+  readOnly   : ['AuthorizationData', 'CreatedAt', 'GatewayArn', 'LastSynchronizedAt', 'PrivateEndpointManagedResources', 'ProtocolType', 'Status', 'StatusReasons', 'TargetId', 'UpdatedAt']
+  properties :
+     AuthorizationData                  $ref->AuthorizationData
+     CreatedAt                          string    
+     CredentialProviderConfigurations   array     
+     Description                        string    
+     GatewayArn                         string    
+     GatewayIdentifier                  string    
+     LastSynchronizedAt                 string    
+     MetadataConfiguration              $ref->MetadataConfiguration
+     Name                               string    
+     PrivateEndpoint                    $ref->PrivateEndpoint
+     PrivateEndpointManagedResources    array     
+     ProtocolType                       $ref->TargetProtocolType
+     Status                             $ref->TargetStatus
+     StatusReasons                      array     
+     TargetConfiguration                $ref->TargetConfiguration *
+     TargetId                           string    
+     UpdatedAt                          string    
+============================================================================================
+AWS::BedrockAgentCore::GatewayRateLimit   (version None)
+--------------------------------------------------------------------------------------------
+  required   : ['DimensionKeys', 'Entries']
+  createOnly : ['DimensionKeys', 'GatewayIdentifier', 'RateLimitId']
+  readOnly   : ['CreatedAt', 'Status', 'UpdatedAt']
+  properties :
+     CreatedAt                          string    
+     Description                        string    
+     DimensionKeys                      array      *
+     Entries                            array      *
+     GatewayIdentifier                  string    
+     RateLimitId                        string    
+     Status                             $ref->GatewayRateLimitStatus
+     UpdatedAt                          string    
+============================================================================================
+AWS::BedrockAgentCore::PolicyEngine   (version None)
+--------------------------------------------------------------------------------------------
+  required   : ['Name']
+  createOnly : ['EncryptionKeyArn', 'Name']
+  readOnly   : ['CreatedAt', 'PolicyEngineArn', 'PolicyEngineId', 'Status', 'StatusReasons', 'UpdatedAt']
+  properties :
+     CreatedAt                          string    
+     Description                        string    
+     EncryptionKeyArn                   string    
+     Name                               string     *
+     PolicyEngineArn                    string    
+     PolicyEngineId                     string    
+     Status                             $ref->PolicyEngineStatus
+     StatusReasons                      array     
+     Tags                               array     
+     UpdatedAt                          string    
+============================================================================================
+AWS::BedrockAgentCore::Policy   (version None)
+--------------------------------------------------------------------------------------------
+  required   : ['PolicyEngineId', 'Name', 'Definition']
+  createOnly : ['Name', 'PolicyEngineId']
+  readOnly   : ['CreatedAt', 'PolicyArn', 'PolicyId', 'Status', 'StatusReasons', 'UpdatedAt']
+  properties :
+     CreatedAt                          string    
+     Definition                         $ref->PolicyDefinition *
+     Description                        string    
+     EnforcementMode                    $ref->EnforcementMode
+     Name                               string     *
+     PolicyArn                          string    
+     PolicyEngineId                     string     *
+     PolicyId                           string    
+     Status                             $ref->PolicyStatus
+     StatusReasons                      array     
+     UpdatedAt                          string    
+     ValidationMode                     $ref->PolicyValidationMode
+============================================================================================
+AWS::BedrockAgentCore::Harness   (version None)
+--------------------------------------------------------------------------------------------
+  required   : ['HarnessName', 'ExecutionRoleArn', 'Model']
+  createOnly : ['EncryptionKeyArn', 'HarnessName']
+  readOnly   : ['AgentRuntimeArn', 'AgentRuntimeId', 'AgentRuntimeName', 'Arn', 'CreatedAt', 'HarnessId', 'Status', 'UpdatedAt', 'Version']
+  properties :
+     AllowedTools                       array     
+     Arn                                string    
+     AuthorizerConfiguration            $ref->AuthorizerConfiguration
+     CreatedAt                          string    
+     Environment                        $ref->HarnessEnvironmentProvider
+     EnvironmentArtifact                $ref->HarnessEnvironmentArtifact
+     EnvironmentVariables               object    
+     ExecutionRoleArn                   string     *
+     HarnessId                          string    
+     HarnessName                        string     *
+     MaxIterations                      integer   
+     MaxTokens                          integer   
+     Memory                             $ref->HarnessMemoryConfiguration
+     Model                              $ref->HarnessModelConfiguration *
+     Skills                             array     
+     Status                             $ref->HarnessStatus
+     SystemPrompt                       array     
+     Tags                               array     
+     TimeoutSeconds                     integer   
+     Tools                              array     
+     Truncation                         $ref->HarnessTruncationConfiguration
+     UpdatedAt                          string    
+     Version                            string    
+============================================================================================
+AWS::BedrockAgentCore::HarnessEndpoint   (version None)
+--------------------------------------------------------------------------------------------
+  required   : ['HarnessId', 'EndpointName']
+  createOnly : ['EndpointName', 'HarnessId']
+  readOnly   : ['Arn', 'CreatedAt', 'HarnessName', 'LiveVersion', 'Status', 'UpdatedAt']
+  properties :
+     Arn                                string    
+     CreatedAt                          string    
+     Description                        string    
+     EndpointName                       string     *
+     HarnessId                          string     *
+     HarnessName                        string    
+     LiveVersion                        string    
+     Status                             $ref->HarnessEndpointStatus
+     Tags                               array     
+     TargetVersion                      string    
+     UpdatedAt                          string    
+
+wrote spike/cfn_schemas.json

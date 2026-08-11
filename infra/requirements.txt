@@ -1,0 +1,14 @@
+# KYC in 90 Seconds — infrastructure dependencies
+#
+# Pinned deliberately. A-16 records that CDK alpha modules break without warning, so
+# every version here is exact, not a range.
+
+aws-cdk-lib==2.222.0
+constructs==10.4.2
+boto3==1.43.67
+botocore==1.43.67
+
+# Tests. pytest asserts against the synthesised CloudFormation template, which is how
+# irreversible properties (Object Lock at creation) are checked before a deploy.
+pytest==8.4.2
+pytest-cov==6.2.1
