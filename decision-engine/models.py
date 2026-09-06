@@ -244,3 +244,77 @@ class OutcomeDecision:
     tier: TierDecision | None = None
     edge_cases: tuple[str, ...] = ()
     recorded_signals: dict[str, object] = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------- Phase 3 lifecycle
+#
+# Ongoing monitoring (G-01). These types exist so a risk event arriving after approval produces a
+# NEW, appended decision rather than an edit of the original — see `lifecycle.py` for why that
+# distinction is the whole point of the flow.
+
+
+class RiskEventSeverity(Enum):
+    """How serious an inbound lifecycle event is, independent of the recomputed tier.
+
+    Separate from `Severity` (which grades adverse media) because the two are consumed by
+    different rules and collapsing them would let a media grading freeze an account.
+    """
+
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+class Phase3Outcome(Enum):
+    """R31 — what a re-assessment concluded.
+
+    `RISK_UNCHANGED` is an explicit, recorded outcome rather than an absence of one: "we looked and
+    nothing changed" is evidence, and an examiner asking why no action was taken needs it to exist.
+    `SYSTEM_ERROR` is first-class for the same reason it is in Phase 1 — a control that could not
+    run must never be indistinguishable from a control that passed.
+    """
+
+    RISK_UNCHANGED = "RISK_UNCHANGED"
+    RISK_INCREASED_RESTRICT = "RISK_INCREASED_RESTRICT"
+    RISK_INCREASED_REVIEW = "RISK_INCREASED_REVIEW"
+    FREEZE = "FREEZE"
+    SYSTEM_ERROR = "SYSTEM_ERROR"
+
+
+@dataclass(frozen=True, kw_only=True)
+class RiskEvent:
+    """An inbound lifecycle signal — the day-12 trigger.
+
+    `event_id` is load-bearing rather than decorative: it is the idempotency key for both the
+    Step Functions execution name and the append-only history write, so a replayed event cannot
+    produce a second decision. `occurred_at` is carried separately from the decision timestamp
+    because the gap between them is itself auditable.
+    """
+
+    event_id: str
+    event_type: str
+    severity: RiskEventSeverity
+    customer_id: str
+    occurred_at: str
+    detail: dict[str, object] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, kw_only=True)
+class LifecycleDecision:
+    """The result of a re-assessment, carrying both tiers so the delta is explicit.
+
+    Holding `day0_tier` and `new_tier` side by side is what makes the record self-explanatory: the
+    reason for an action is the movement, not the endpoint, and storing only the new tier would
+    lose the fact that anything changed at all.
+    """
+
+    case_id: str
+    outcome: Phase3Outcome
+    day0_tier: RiskTier
+    new_tier: RiskTier
+    version: int
+    decided_at: str
+    event_id: str
+    next_review_days: int | None
+    rationale: str

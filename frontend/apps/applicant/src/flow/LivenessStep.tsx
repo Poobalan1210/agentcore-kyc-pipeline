@@ -18,6 +18,14 @@ import { api } from "@shared/api/client";
  * across a retry, so a failed attempt always gets a genuinely fresh session rather than retrying
  * a session that is now guaranteed to fail.
  */
+/**
+ * How long the detector may sit in its own connect/init state before we treat it as wedged rather
+ * than slow. Streaming normally begins in a few seconds; this is deliberately several times that
+ * so a slow network or a cold model load is never mistaken for the permanent stall described on
+ * the watchdog effect below.
+ */
+const LIVENESS_CONNECT_TIMEOUT_MS = 25_000;
+
 export function LivenessStep({
   jurisdiction,
   applicationId,
@@ -57,6 +65,52 @@ export function LivenessStep({
   useEffect(() => {
     fetchSession();
   }, [fetchSession]);
+
+  /**
+   * Watchdog for a wedged connect, observed on a real webcam (MacBook Air Camera, Chrome 141).
+   *
+   * `FaceLivenessDetector`'s internal machine goes `initCamera.cameraCheck` -> (on success)
+   * `initCamera.waitForDOMAndCameraDetails`, and that state is declared `{}` — no `after`, no
+   * timeout, no error transition. It leaves it only on a `SET_DOM_AND_CAMERA_DETAILS` event. When
+   * that event never arrives the machine parks there permanently: the WebSocket to
+   * streaming-rekognition is never opened, `onError` is never invoked, and the applicant is left
+   * on "Connecting..." forever with no way forward. Measured: still spinning after 150s.
+   *
+   * getUserMedia itself is NOT the failure — the library's exact constraint shape
+   * ({width:{min:320,ideal:640}, height:{min:240,ideal:480}, frameRate:{min:15,ideal:30,max:60},
+   * facingMode:'user'}) resolves fine against this camera. The stall is downstream of acquisition.
+   *
+   * Because the component exposes no "connected" callback, progress is read from the library's own
+   * rendered state: it shows `data-testid="centered-loader"` for exactly `isInitCamera ||
+   * isInitWebsocket`, so that node disappearing IS the signal that streaming began. The separate
+   * `waiting-camera-permission` node is excluded, otherwise an applicant who takes their time over
+   * the browser permission prompt would be failed for being slow rather than for being stuck.
+   *
+   * A liveness SessionId also expires 3 minutes after issue (F-40), so waiting longer than this
+   * cannot succeed anyway — the session would be dead before the applicant ever saw the oval.
+   */
+  useEffect(() => {
+    if (!session || error) return;
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      const connecting = document.querySelector('[data-testid="centered-loader"]');
+      const awaitingPermission = document.querySelector(
+        '[data-testid="waiting-camera-permission"]',
+      );
+      if (!connecting) {
+        clearInterval(timer);
+        return;
+      }
+      if (!awaitingPermission && Date.now() - startedAt >= LIVENESS_CONNECT_TIMEOUT_MS) {
+        clearInterval(timer);
+        setError(
+          "The camera check could not start. This can happen with some cameras or if another " +
+            "app is using the camera. Close any other app using it, then start a new attempt.",
+        );
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [session, error]);
 
   const handleAnalysisComplete = useCallback(async () => {
     if (!session) return;

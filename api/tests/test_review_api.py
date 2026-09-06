@@ -159,56 +159,46 @@ class TestListQueue:
         assert fake_ddb.query_calls[0]["IndexName"] == "state-index"
 
     def test_merges_the_task_token_from_the_review_sqs_queue(self, monkeypatch):
-        """design §7.5 — the task token `asl.py`'s ManualReview state sends only exists in the
-        SQS message body, never on the case record. The console cannot submit a decision
-        without it, so list_queue must merge the two sources by applicantId."""
+        """design §7.5 — the console cannot submit a decision without the task token.
+
+        It is read from the case record, written once by `review/token_materializer.py` when the
+        review was handed off. It used to be discovered with `ReceiveMessage` on every request,
+        which cannot work: each read spends the message's finite redrive budget
+        (`maxReceiveCount: 5`), so the sixth *view* of a case moved a LIVE token to the DLQ —
+        observed twice against the deployed stack, five waiting cases disappearing from the
+        reviewer's queue while their executions stayed alive.
+        """
         items = [
             {"applicantId": {"S": "APP-1"}, "caseId": {"S": "CASE-1"},
-             "jurisdiction": {"S": "us"}, "createdAt": {"S": "2026-08-01T00:00:00Z"}},
+             "jurisdiction": {"S": "us"}, "createdAt": {"S": "2026-08-01T00:00:00Z"},
+             "reviewTaskToken": {"S": "token-abc"}},
         ]
         fake_ddb = FakeDynamo(query_items=items)
-        fake_sqs = FakeSqs(messages=[
-            {"Body": json.dumps({"applicantId": "APP-1", "caseId": "CASE-1",
-                                "taskToken": "token-abc"})},
-        ])
-        monkeypatch.setitem(sys.modules, "boto3", FakeBoto3Module(ddb=fake_ddb, sqs=fake_sqs))
+        monkeypatch.setitem(sys.modules, "boto3", FakeBoto3Module(ddb=fake_ddb))
         monkeypatch.setenv("CASE_TABLE_NAME", "kyc90-cases")
-        monkeypatch.setenv("REVIEW_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/kyc90-review")
-        event = dict(REVIEWER_EVENT_CONTEXT)
-        resp = review_api.list_queue(event)
-        body = json.loads(resp["body"])
-        assert body["cases"][0]["taskToken"] == "token-abc"
+        resp = review_api.list_queue(dict(REVIEWER_EVENT_CONTEXT))
+        assert json.loads(resp["body"])["cases"][0]["taskToken"] == "token-abc"
 
-    def test_finds_a_token_behind_a_backlog_of_older_reviews(self, monkeypatch):
-        """Found live: SQS returns at most 10 messages per call, and with 18 older waiting reviews
-        ahead of it the newest case was listed from DynamoDB with no `taskToken` at all — visible
-        in the console but impossible to act on. The peek has to read past the backlog."""
-        items = [{"applicantId": {"S": "APP-NEW"}, "caseId": {"S": "CASE-NEW"},
-                  "jurisdiction": {"S": "us"}, "createdAt": {"S": "2026-08-01T00:00:00Z"}}]
-        backlog = [
-            {"Body": json.dumps({"applicantId": f"APP-OLD-{i}", "taskToken": f"tok-{i}"}),
-             "ReceiptHandle": f"rh-{i}"}
-            for i in range(18)
-        ]
-        target = {"Body": json.dumps({"applicantId": "APP-NEW", "taskToken": "tok-new"}),
-                  "ReceiptHandle": "rh-new"}
-        fake_sqs = FakeSqs(messages=backlog + [target])
-        monkeypatch.setitem(
-            sys.modules, "boto3",
-            FakeBoto3Module(ddb=FakeDynamo(query_items=items), sqs=fake_sqs))
-        monkeypatch.setenv("CASE_TABLE_NAME", "kyc90-cases")
-        monkeypatch.setenv("REVIEW_QUEUE_URL",
-                           "https://sqs.us-east-1.amazonaws.com/123/kyc90-review")
-
-        body = json.loads(review_api.list_queue(dict(REVIEWER_EVENT_CONTEXT))["body"])
-        assert body["cases"][0]["taskToken"] == "tok-new"
-        assert fake_sqs.receive_calls > 1, "a single receive cannot see past a 10-message batch"
-
-    def test_peek_stops_early_on_an_empty_queue(self, monkeypatch):
-        """No wasted round trips when there is nothing waiting — the loop breaks on the first
-        empty response rather than always burning its full budget."""
+    def test_case_without_a_materialised_token_omits_it(self, monkeypatch):
+        """Absent must be absent, not empty string — the console branches on presence to decide
+        between an actionable case, a pending one, and one whose review window has expired."""
         items = [{"applicantId": {"S": "APP-1"}, "caseId": {"S": "CASE-1"},
                   "jurisdiction": {"S": "us"}, "createdAt": {"S": "2026-08-01T00:00:00Z"}}]
+        monkeypatch.setitem(sys.modules, "boto3",
+                            FakeBoto3Module(ddb=FakeDynamo(query_items=items)))
+        monkeypatch.setenv("CASE_TABLE_NAME", "kyc90-cases")
+        resp = review_api.list_queue(dict(REVIEWER_EVENT_CONTEXT))
+        assert "taskToken" not in json.loads(resp["body"])["cases"][0]
+
+    def test_listing_the_queue_never_reads_from_sqs(self, monkeypatch):
+        """The whole point of moving the token: listing must have no side effect on the message.
+
+        A read that consumes redrive budget is not a read. This asserts the endpoint has no path
+        back to `ReceiveMessage`, so the regression cannot be reintroduced quietly.
+        """
+        items = [{"applicantId": {"S": "APP-1"}, "caseId": {"S": "CASE-1"},
+                  "jurisdiction": {"S": "us"}, "createdAt": {"S": "2026-08-01T00:00:00Z"},
+                  "reviewTaskToken": {"S": "token-abc"}}]
         fake_sqs = FakeSqs(messages=[])
         monkeypatch.setitem(
             sys.modules, "boto3",
@@ -217,21 +207,10 @@ class TestListQueue:
         monkeypatch.setenv("REVIEW_QUEUE_URL",
                            "https://sqs.us-east-1.amazonaws.com/123/kyc90-review")
         review_api.list_queue(dict(REVIEWER_EVENT_CONTEXT))
-        assert fake_sqs.receive_calls == 1
-
-    def test_does_not_delete_the_message_while_peeking(self, monkeypatch):
-        """ReceiveMessage without DeleteMessage — the decision is still released through
-        review_handler.py's own path, this endpoint only reads."""
-        items = [{"applicantId": {"S": "APP-1"}, "caseId": {"S": "CASE-1"},
-                 "jurisdiction": {"S": "us"}, "createdAt": {"S": "2026-08-01T00:00:00Z"}}]
-        fake_ddb = FakeDynamo(query_items=items)
-        fake_sqs = FakeSqs(messages=[])
-        monkeypatch.setitem(sys.modules, "boto3", FakeBoto3Module(ddb=fake_ddb, sqs=fake_sqs))
-        monkeypatch.setenv("CASE_TABLE_NAME", "kyc90-cases")
-        monkeypatch.setenv("REVIEW_QUEUE_URL", "https://sqs.us-east-1.amazonaws.com/123/kyc90-review")
-        event = dict(REVIEWER_EVENT_CONTEXT)
-        review_api.list_queue(event)
-        assert not hasattr(fake_sqs, "delete_message_calls") or fake_sqs.delete_calls == []
+        assert getattr(fake_sqs, "receive_calls", 0) == 0, (
+            "listing the queue must not call ReceiveMessage: every receive spends redrive budget "
+            "and can send a live task token to the dead-letter queue"
+        )
 
 
 class TestSubmitDecision:
@@ -600,3 +579,68 @@ class TestGetAudit:
         event["pathParameters"] = {}
         resp = review_api.get_audit(event)
         assert resp["statusCode"] == 400
+
+
+class TestPeekDoesNotBurnRedriveBudget:
+    """A queue peek must not spend the message's redrive budget or delete a pending review.
+
+    Reading a token uses `ReceiveMessage`, which increments ApproximateReceiveCount, and the review
+    queue carries `maxReceiveCount: 5`. So "peeking" is not free: the sixth read of a case moves a
+    LIVE Step Functions task token to the DLQ. Proven live — releasing visibility to 0 removed the
+    incidental rate limit and about five console polls redrove all five waiting cases to
+    kyc90-review-dlq while their executions stayed alive.
+
+    These tests pin the two properties that keep a live token where a reviewer can reach it.
+    """
+
+    class _FakeSqs:
+        def __init__(self, batches):
+            self.batches = list(batches)
+            self.released = []
+            self.deleted = []
+            self.receives = 0
+
+        def receive_message(self, **kw):
+            self.receives += 1
+            if not self.batches:
+                return {}
+            return {"Messages": self.batches.pop(0)}
+
+        def change_message_visibility(self, *, QueueUrl, ReceiptHandle, VisibilityTimeout):
+            self.released.append((ReceiptHandle, VisibilityTimeout))
+
+        def delete_message(self, **kw):
+            self.deleted.append(kw)
+
+    def _msg(self, applicant, handle):
+        import json
+        return {"ReceiptHandle": handle,
+                "Body": json.dumps({"applicantId": applicant, "taskToken": "tok-" + applicant})}
+
+    def test_reads_the_tokens(self):
+        from review_api import _peek_task_tokens
+        sqs = self._FakeSqs([[self._msg("APP-1", "h1"), self._msg("APP-2", "h2")]])
+        assert _peek_task_tokens(sqs, "q") == {"APP-1": "tok-APP-1", "APP-2": "tok-APP-2"}
+
+    def test_does_not_release_visibility(self):
+        """Releasing removes the only throttle on a finite redrive budget (maxReceiveCount=5)."""
+        from review_api import _peek_task_tokens
+        sqs = self._FakeSqs([[self._msg("APP-1", "h1")]])
+        _peek_task_tokens(sqs, "q")
+        assert sqs.released == [], (
+            "must not reset visibility: each receive spends redrive budget, and releasing lets "
+            "console polling redrive live task tokens to the DLQ"
+        )
+
+    def test_never_deletes_a_pending_review(self):
+        from review_api import _peek_task_tokens
+        sqs = self._FakeSqs([[self._msg("APP-1", "h1")]])
+        _peek_task_tokens(sqs, "q")
+        assert sqs.deleted == [], "deleting would discard a live task token"
+
+    def test_stops_receiving_once_the_queue_is_drained(self):
+        """Bounded receives per request:every extra round spends redrive budget for nothing."""
+        from review_api import _peek_task_tokens
+        sqs = self._FakeSqs([[self._msg("APP-1", "h1")]])
+        _peek_task_tokens(sqs, "q")
+        assert sqs.receives == 2, "one round with messages, one empty round to detect the end"

@@ -270,7 +270,14 @@ class ApiStack(Stack):
         # 14.6/design §7.5) but the decision is still consumed and released the same way it
         # always was, through review_handler.py's SendTaskSuccess/Failure, not by this Lambda
         # deleting the SQS message.
-        review_queue.grant(self.review_fn, "sqs:ReceiveMessage")
+        # ReceiveMessage to peek the task tokens, ChangeMessageVisibility to *release* them
+        # again before responding. Without the release grant the peek leaves every message
+        # hidden for the visibility timeout and the console starves its own next poll,
+        # rendering actionable cases as "Task token not yet visible" — and because
+        # `_peek_task_tokens` swallows a failed release by design, an AccessDenied here is
+        # invisible at runtime. Never DeleteMessage: that would discard a live task token.
+        review_queue.grant(
+            self.review_fn, "sqs:ReceiveMessage", "sqs:ChangeMessageVisibility")
         self.review_fn.add_to_role_policy(iam.PolicyStatement(
             sid="WriteReviewDecision",
             actions=["dynamodb:UpdateItem"],

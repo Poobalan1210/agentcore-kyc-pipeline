@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -27,7 +28,7 @@ from record import (
     VersionPins,
     build_decision_record,
 )
-from spans import collect_evidence
+from spans import collect_evidence, evidence_from_case_record
 from writer import put_decision_record
 
 
@@ -63,29 +64,78 @@ def _unmarshal(item: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_OTEL_TRACE_ID = re.compile(r"^[0-9a-f]{32}$")
+
+
+def _otel_trace_id(supplied: str) -> str:
+    """The OTEL trace id to query spans by, preferring a real one over a plausible one.
+
+    Spans in the unified traces destination are keyed by a 32-hex-character OTEL trace id. The
+    state machine was passing `$states.context.Execution.Name` here — a value that is always
+    present, never a trace id, and matched nothing, so the span query returned empty on every run
+    and every decision was refused as incomplete. `$exists`-style plausibility is the trap: the
+    field was populated, just not with an id anything is indexed by.
+
+    X-Ray tracing is enabled on the state machine and both Lambdas run in Active mode, so this
+    function's own invocation is inside the execution's trace. `_X_AMZN_TRACE_ID` therefore carries
+    the same trace as the agent and decision spans, and needs no plumbing through the ASL at all.
+
+    The two formats are the same 128 bits written differently — X-Ray
+    `Root=1-6a9bfd6a-6ecd4731cde923a5b99cebd4` is OTEL `6a9bfd6a6ecd4731cde923a5b99cebd4` with the
+    version prefix and dashes removed. Verified against a real span in `aws/spans`.
+    """
+    if _OTEL_TRACE_ID.match(supplied.strip().lower()):
+        return supplied.strip().lower()
+    header = os.environ.get("_X_AMZN_TRACE_ID", "")
+    for part in header.split(";"):
+        if part.startswith("Root="):
+            root = part[len("Root="):]
+            candidate = root.replace("-", "")
+            # "1-" version prefix, then 8 hex + 24 hex
+            if candidate.startswith("1") and len(candidate) == 33:
+                candidate = candidate[1:]
+            if _OTEL_TRACE_ID.match(candidate.lower()):
+                return candidate.lower()
+    return ""
+
+
 def _spans_for(trace_id: str, *, log_group: str, client: Any) -> list[dict[str, Any]]:
-    """Spans for one trace from the per-agent log group (design §9.3, F-20).
+    """Spans for one trace from the configured span log groups (design §9.3, F-20).
+
+    `log_group` is a comma-separated list. Design §9.3 names the per-agent group
+    `/aws/bedrock-agentcore/runtimes/{agentId}-{endpointName}` *and* mandates
+    `UNIFIED_TRACES_DESTINATION_ENABLED=true`, which are in tension: enabling the unified
+    destination is what sends spans to the account-wide `aws/spans` group, and the per-agent groups
+    then carry only runtime stdout (verified live — they hold `[runtime-logs]` streams and no
+    `spans` stream). Both are queried rather than picking one, so the evidence is found wherever
+    the platform actually put it.
+
+    `logs:FilterLogEvents` takes a single `logGroupName`, so each group is queried in turn and the
+    results merged.
 
     Returns an empty list on any failure rather than raising: an unavailable log query must
     produce an *incomplete record*, which is refused loudly, rather than an exception that a
-    retry policy might quietly absorb.
+    retry policy might quietly absorb. A group that does not exist raises per group, so one bad
+    name cannot mask the others' spans.
     """
-    if not trace_id or not log_group:
-        return []
-    try:
-        response = client.filter_log_events(
-            logGroupName=log_group,
-            filterPattern=f'{{ $.traceId = "{trace_id}" }}',
-            limit=1000,
-        )
-    except Exception:  # noqa: BLE001 - see docstring
+    groups = [g.strip() for g in log_group.split(",") if g.strip()]
+    if not trace_id or not groups:
         return []
     spans: list[dict[str, Any]] = []
-    for event in response.get("events", []):
+    for group in groups:
         try:
-            spans.append(json.loads(event["message"]))
-        except (json.JSONDecodeError, KeyError):
+            response = client.filter_log_events(
+                logGroupName=group,
+                filterPattern=f'{{ $.traceId = "{trace_id}" }}',
+                limit=1000,
+            )
+        except Exception:  # noqa: BLE001 - see docstring
             continue
+        for event in response.get("events", []):
+            try:
+                spans.append(json.loads(event["message"]))
+            except (json.JSONDecodeError, KeyError):
+                continue
     return spans
 
 
@@ -105,9 +155,22 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
     logs = boto3.client("logs")
 
     case = _case_record(applicant_id, table=table, client=ddb)
+    # Spans first, case record second — not the other way round. If the platform ever does emit
+    # reasoning spans they carry strictly more (model/harness versions, span ids), so they win when
+    # they are complete. Today they never are: the AgentCore Harness surface emits no span carrying
+    # agent_name/tool_name/outcome, verified with Transaction Search ACTIVE and 100% sampling.
+    #
+    # The fallback is not a weaker record. `phase1Evidence` and the persisted tool results are
+    # written synchronously by the state machine that decided the case, so they cannot drift from
+    # the decision the way a sampled best-effort log query can. `build_decision_record` still
+    # refuses anything incomplete — the gate is unchanged, only the source it can be satisfied from.
     evidence = collect_evidence(_spans_for(
-        str(event.get("traceId") or case.get("traceId") or ""),
+        _otel_trace_id(str(event.get("traceId") or case.get("traceId") or "")),
         log_group=log_group, client=logs))
+    if not evidence.complete:
+        from_case = evidence_from_case_record(case, decision=decision, phase=phase)
+        if from_case.complete or len(from_case.missing) < len(evidence.missing):
+            evidence = from_case
 
     decided_at = datetime.now(timezone.utc)
     record = build_decision_record(

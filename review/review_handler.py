@@ -43,6 +43,7 @@ from decisions import (
     parse_action,
     resolve,
     resume_payload,
+    to_attribute_value,
 )
 
 LOG = logging.getLogger(__name__)
@@ -89,13 +90,30 @@ def _error_code(exc: Exception) -> str:
     return type(exc).__name__
 
 
+def _serialized_request(request: Mapping[str, Any]) -> dict[str, Any]:
+    """`to_request()` output with Key and ExpressionAttributeValues in DynamoDB wire form."""
+    out = dict(request)
+    if isinstance(out.get("Key"), Mapping):
+        out["Key"] = {k: to_attribute_value(v) for k, v in out["Key"].items()}
+    if isinstance(out.get("ExpressionAttributeValues"), Mapping):
+        out["ExpressionAttributeValues"] = {
+            k: to_attribute_value(v) for k, v in out["ExpressionAttributeValues"].items()
+        }
+    return out
+
+
 def _returned_item(exc: Exception) -> Mapping[str, Any] | None:
-    """`ReturnValuesOnConditionCheckFailure=ALL_OLD` puts the winning item on the exception."""
+    """`ReturnValuesOnConditionCheckFailure=ALL_OLD` puts the winning item on the exception.
+
+    Deserialized like `load_case`'s: this item is handed to the same pure `decisions.py` functions,
+    which read plain values. Returning the wrapped shape here would make the *conflict* path report
+    a bogus CASE_MISMATCH instead of naming the reviewer who won.
+    """
     response = getattr(exc, "response", None)
     if isinstance(response, Mapping):
         item = response.get("Item")
-        if isinstance(item, Mapping):
-            return item
+        if isinstance(item, Mapping) and item:
+            return deserialize_item(item)
     return None
 
 
@@ -192,14 +210,103 @@ def load_case(
 ) -> Mapping[str, Any] | None:
     """Strongly consistent read. An eventually consistent one would let the losing reviewer see no
     existing decision and proceed to a write that the condition then rejects — correct, but it turns
-    the common contested case into an exception path instead of a clean 409."""
+    the common contested case into an exception path instead of a clean 409.
+
+    Keys are wrapped as AttributeValues because `dynamodb` here is the low-level **client**, not a
+    `Table` resource. Passing bare strings raised
+    `ParamValidationError: Invalid type for parameter Key.applicantId ... valid types: <class 'dict'>`
+    and every decision submission returned 500. It went unnoticed because it was unreachable: the
+    console could never obtain a task token, so `Submit decision` was permanently disabled and this
+    line had never once executed against the deployed stack.
+
+    The returned item is **deserialized** for the same reason, in the other direction. Everything in
+    `decisions.py` is a pure function over a plain case record — `str(case.get("caseId"))` compared
+    against a plain string, `preliminary_tier(case, phase)`, `existing_review(case, phase)`. Handing
+    those the client's wrapped shape made `caseId` compare as `"{'S': 'CASE-...'}"`, so a correct
+    submission was rejected `CASE_MISMATCH: caseId does not match the case record` even though the
+    ids were byte-identical. Unwrapping once here keeps the wire format at the boundary instead of
+    leaking it into the decision rules.
+    """
     response = dynamodb.get_item(
         TableName=table_name,
-        Key={keys.partition_key: submission.applicant_id, keys.sort_key: keys.case_sort_value},
+        Key={
+            keys.partition_key: {"S": submission.applicant_id},
+            keys.sort_key: {"S": keys.case_sort_value},
+        },
         ConsistentRead=True,
     )
     item = response.get("Item")
-    return item if isinstance(item, Mapping) and item else None
+    if not (isinstance(item, Mapping) and item):
+        return None
+    return _parse_phase_blobs(deserialize_item(item))
+
+
+#: Case attributes `asl.py` stores as a JSON *string* rather than a Map, which every reader in
+#: `decisions.py` nonetheless treats as a Mapping.
+_JSON_BLOB_ATTRIBUTES = ("phase1", "phase2", "phase3")
+
+
+def _parse_phase_blobs(case: dict[str, Any]) -> dict[str, Any]:
+    """Turn the phase decision blobs from JSON strings into dicts.
+
+    `OpenProvisional` writes `phase1` as a JSON string, but `preliminary_tier` and
+    `existing_review` both do `case.get(phase)` and require a Mapping. Against a real case record
+    they therefore returned `None` for everything — which silently disabled the R4.3 / Property 2
+    guard that forbids approving a PROHIBITED tier, because the tier it checks was never found.
+    An approval that should have been refused would have been accepted.
+
+    Parsed here, at the one boundary that reads the case, so the rules stay pure functions over a
+    plain record and no caller has to know which attributes happen to be stringified.
+    """
+    for attribute in _JSON_BLOB_ATTRIBUTES:
+        raw = case.get(attribute)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            # Leave it as the string. A blob we cannot parse must not become a silent {} that reads
+            # as "this phase ran and produced nothing".
+            continue
+        if isinstance(parsed, Mapping):
+            case[attribute] = parsed
+    return case
+
+
+def deserialize_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    """DynamoDB AttributeValues -> plain Python, recursively.
+
+    Hand-rolled rather than `boto3.dynamodb.types.TypeDeserializer` so that an unrecognised or
+    already-plain value passes through unchanged instead of raising. This runs on the reviewer's
+    submit path, where refusing a whole decision because one unexpected attribute appeared on the
+    case record would be a worse failure than ignoring that attribute.
+    """
+    def convert(value: Any) -> Any:
+        if not isinstance(value, Mapping) or len(value) != 1:
+            return value
+        (member, inner), = value.items()
+        if member == "S":
+            return inner
+        if member == "N":
+            # int where it is exact, so a tier threshold or count compares as a number.
+            text = str(inner)
+            try:
+                return int(text) if "." not in text else float(text)
+            except ValueError:
+                return text
+        if member in ("BOOL", "Bool"):
+            return bool(inner)
+        if member == "NULL":
+            return None
+        if member == "M":
+            return {k: convert(v) for k, v in inner.items()} if isinstance(inner, Mapping) else inner
+        if member == "L":
+            return [convert(v) for v in inner] if isinstance(inner, list) else inner
+        if member in ("SS", "NS", "BS"):
+            return list(inner) if isinstance(inner, list) else inner
+        return value
+
+    return {key: convert(value) for key, value in item.items()}
 
 
 def apply_decision(
@@ -217,7 +324,12 @@ def apply_decision(
     write = build_conditional_write(
         submission=submission, decision=decision, table_name=table_name, keys=keys)
     try:
-        dynamodb.update_item(**write.to_request())
+        # Serialize at the boundary: `decisions.py` produces plain values, the low-level client
+        # requires AttributeValues. Without this the client rejects the write outright
+        # ("Invalid type for parameter ExpressionAttributeValues.:target ... valid types:
+        # <class 'dict'>") and every reviewer decision returned 500 — unnoticed because no reviewer
+        # could obtain a task token to submit one.
+        dynamodb.update_item(**_serialized_request(write.to_request()))
     except Exception as exc:  # noqa: BLE001 - narrowed immediately by error code
         if _error_code(exc) != "ConditionalCheckFailedException":
             raise

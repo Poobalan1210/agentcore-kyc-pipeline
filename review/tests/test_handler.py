@@ -84,7 +84,7 @@ class TestAcceptedDecision:
     def test_the_decision_is_written_and_the_execution_resumes(self, dynamo, sfn):
         response = run(api_event(), dynamo=dynamo, sfn=sfn)
         assert response["statusCode"] == 200
-        assert dynamo.item["phase1"]["review"]["reviewerId"] == "reviewer-a"
+        assert dynamo.item["phase1Review"]["reviewerId"] == "reviewer-a"
         assert len(sfn.successes) == 1
 
     def test_the_case_transitions_to_the_target_state(self, dynamo, sfn):
@@ -118,7 +118,7 @@ class TestAcceptedDecision:
 
     def test_the_rationale_reaches_the_case_record(self, dynamo, sfn):
         run(api_event(rationale="sanctions hit is a namesake"), dynamo=dynamo, sfn=sfn)
-        assert dynamo.item["phase1"]["review"]["rationale"] == "sanctions hit is a namesake"
+        assert dynamo.item["phase1Review"]["rationale"] == "sanctions hit is a namesake"
 
 
 class TestFirstWriterWins:
@@ -140,7 +140,7 @@ class TestFirstWriterWins:
         run(api_event(reviewer_sub="reviewer-a"), dynamo=dynamo, sfn=sfn)
         run(api_event(reviewer_sub="reviewer-b", request_id="req-2", action="REJECT"),
             dynamo=dynamo, sfn=sfn)
-        assert dynamo.item["phase1"]["review"]["action"] == "APPROVE"
+        assert dynamo.item["phase1Review"]["action"] == "APPROVE"
         assert dynamo.item["state"] == "PROVISIONAL"
 
     def test_the_loser_does_not_resume_the_execution(self, sfn):

@@ -98,8 +98,63 @@ def agent_text(result: Any) -> str:
     return ""
 
 
+def _repr_to_json(text: str) -> dict[str, Any] | None:
+    """A Python-`repr` dict rendered as a string, parsed into a real dict.
+
+    Agents nest a tool's return value as its Python repr rather than as JSON::
+
+        {"tool": "SanctionsExact___sanctions_exact_match",
+         "result": "{'status':'OK','data':{'matched':false,'hitCount':0,...}}"}
+
+    `matched` is then inside a *string*, so a JSON walker never reaches it, the signal resolves to
+    None, and the agent is reported UNAVAILABLE — a clean sanctions result fail-closing a clean
+    applicant to a human. Measured live on the prescreen agent.
+
+    Normalised textually rather than with `ast.literal_eval`, because these payloads mix Python
+    quoting with JSON literals (`false`, not `False`) and are not valid Python either. Anything that
+    still will not parse returns None and is simply not searched — never a fabricated value.
+    """
+    candidate = text.strip()
+    if not (candidate.startswith("{") and candidate.endswith("}")):
+        return None
+    try:
+        parsed = json.loads(candidate)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+    normalised = (candidate
+                  .replace("'", '"')
+                  .replace(": True", ": true").replace(":True", ":true")
+                  .replace(": False", ": false").replace(":False", ":false")
+                  .replace(": None", ": null").replace(":None", ":null"))
+    try:
+        parsed = json.loads(normalised)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _expand_nested(objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`objects` plus any dicts recovered from string values inside them, recursively."""
+    out = list(objects)
+    queue = list(objects)
+    while queue:
+        node = queue.pop()
+        values = node.values() if isinstance(node, Mapping) else (
+            node if isinstance(node, list) else ())
+        for value in values:
+            if isinstance(value, str):
+                nested = _repr_to_json(value)
+                if nested is not None:
+                    out.append(nested)
+                    queue.append(nested)
+            elif isinstance(value, (Mapping, list)):
+                queue.append(value)
+    return out
+
+
 def embedded_json(text: str) -> list[dict[str, Any]]:
-    """Every JSON object embedded in the text.
+    """Every JSON object embedded in the text, including ones nested inside string values.
 
     Agents wrap their answer in prose and `<thinking>` blocks, so the JSON has to be found rather
     than parsed from the whole string. Balanced-brace scanning is used instead of a regex because
@@ -122,7 +177,7 @@ def embedded_json(text: str) -> list[dict[str, Any]]:
                 if isinstance(parsed, dict):
                     found.append(parsed)
                 start = None
-    return found
+    return _expand_nested(found)
 
 
 def _deep_get(objects: list[dict[str, Any]], *keys: str) -> Any:
@@ -207,17 +262,75 @@ def pre_screen_matched(result: Any) -> bool | None:
     return None
 
 
+def _critical_flags(objects: list[dict[str, Any]]) -> list[bool]:
+    """Every boolean whose key names a *critical* signal, anywhere in the payload.
+
+    The contract tool (`submit_fraud_assessment`) asks for one boolean, `velocityCritical`. When the
+    agent answers in prose instead of calling that tool it uses its own richer vocabulary — measured
+    live, a clean case came back as::
+
+        {"deviceAndIpApplicationCounts": {"deviceApplicationCritical": false,
+                                          "ipApplicationCritical": false,
+                                          "deviceApplicationElevated": false, ...},
+         "geographicInconsistency": {...}, "thinFile": false, "syntheticIdentitySignals": []}
+
+    No key is called `velocityCritical`, so the exact-name lookup found nothing, the signal came back
+    `None`, and the fraud agent was reported UNAVAILABLE. The case then fail-closed to a human — with
+    a complete, clean fraud answer sitting in the text. That is what made the 90-second path a coin
+    flip: it depended on whether the model happened to call its tool.
+
+    `*Elevated` / `elevated*` is deliberately NOT collected. Elevated is not critical, and the
+    contract is explicit that `velocityCritical` is "True only if a velocity threshold was
+    breached" — folding a warning-level signal in would invent a breach the agent did not report.
+
+    The token is matched ANYWHERE in the key, not just as a suffix, because the model paraphrases
+    its own field names between runs. Two real shapes, same clean case, hours apart::
+
+        {"deviceApplicationCritical": false, "ipApplicationCritical": false}   # suffix
+        {"criticalDeviceReuse": false, "criticalIpReuse": false}              # prefix
+
+    A suffix-only match read the second shape as "no information" and fail-closed a clean case to a
+    human. That instability is the real problem here: the durable fix is to make the agent actually
+    call `submit_fraud_assessment`, whose schema is fixed and service-validated. This function is
+    the safety net for when it answers in prose instead, and a net has to catch both shapes.
+    """
+    flags: list[bool] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                name = str(key).lower()
+                if isinstance(value, bool) and "critical" in name:
+                    flags.append(value)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    for obj in objects:
+        walk(obj)
+    return flags
+
+
 def velocity_critical(result: Any) -> bool | None:
     """Whether velocity signals are critical. None when it cannot be established."""
     text = agent_text(result)
     if not text:
         return None
 
-    value = _deep_get(embedded_json(text), "critical", "velocitycritical")
+    objects = embedded_json(text)
+    value = _deep_get(objects, "critical", "velocitycritical")
     if isinstance(value, bool):
         return value
     if isinstance(value, str) and value.lower() in ("true", "false"):
         return value.lower() == "true"
+
+    # The agent's own per-signal flags, when it did not use the contract's single field. Any one
+    # breach is critical; all-clear is a genuine clean result, not an absence of information.
+    flags = _critical_flags(objects)
+    if flags:
+        return any(flags)
 
     says_clean = _says(text, _NOT_CRITICAL_PHRASES)
     says_critical = _says(text, _CRITICAL_PHRASES)

@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .config import AGENT_BY_KEY, Agent
+from .config import AGENTS, AGENT_BY_KEY, Agent
 
 #: No hyphen. The ARNs in `Arguments` use `bedrock-agentcore`; this URI does not.
 INVOKE_HARNESS = "arn:aws:states:::bedrockagentcore:invokeHarness"
@@ -226,9 +226,29 @@ def phase1_definition(
                 "{% $enqueuedAtMs != null "
                 "? $firstStateEnteredAtMs - $enqueuedAtMs : null %}"
             ),
-            # A clean, unwrapped projection of `$case`, for agent prompts only. `$case` is the raw
-            # `dynamodb:getItem` result — every value arrives as `{"S": "..."}` / `{"M": {...}}` /
-            # `{"L": [...]}` — and `$string($case)` used to be sent to every Phase 1 agent
+            # Rooted at `$states.result.Item`, NOT at `$case` — even though `case` is assigned the
+            # very same value two lines above. Assignments inside a single `Assign` block are all
+            # evaluated against the state's incoming variable scope, so `$case` here is the value
+            # from *before* this state ran, i.e. unset on the first pass. Every `$exists($case.x)`
+            # guard then evaluated false and the whole projection collapsed to nulls.
+            #
+            # Found live, never by a test: a real submission with a document and a passed liveness
+            # check sent every Phase 1 agent `{"applicantId": "APP-...", "caseId": null,
+            # "declaredIdentity": null, "documents": [], "liveness": null}`. The Documents agent
+            # correctly answered that it could not extract anything, the case degraded to
+            # DegradedPath -> ManualReview, and the applicant waited on "Reviewing your
+            # application" while a human was asked to decide a case with no evidence attached.
+            # Nothing failed, nothing threw, and the 90-second auto-approve path was unreachable.
+            #
+            # The `$exists` guards are what made it silent: they are meant to turn an absent
+            # optional field into an explicit null, and instead they turned an unbound variable
+            # into a full set of plausible nulls. The Choice states further down read `$case` in a
+            # *later* state, where the binding is live, which is why tiering still saw the
+            # documents and liveness this projection had already lost.
+            #
+            # A clean, unwrapped projection for agent prompts only. The raw
+            # `dynamodb:getItem` result wraps every value — `{"S": "..."}` / `{"M": {...}}` /
+            # `{"L": [...]}` — and `$string(...)` of it used to be sent to every Phase 1 agent
             # verbatim. Found live: the Documents and Identity agents intermittently reported "the
             # document was not found" / "the image is unreadable" against a bucket and key that,
             # replayed directly against the same tools with the exact values from the case record,
@@ -247,18 +267,18 @@ def phase1_definition(
             # key that is simply missing, which is easier for a model to misread as "not asked".
             "caseView": {
                 "applicantId": "{% $applicantId %}",
-                "caseId": "{% $exists($case.caseId) ? $case.caseId.S : null %}",
-                "jurisdiction": "{% $exists($case.jurisdiction) ? $case.jurisdiction.S : null %}",
+                "caseId": "{% $exists($states.result.Item.caseId) ? $states.result.Item.caseId.S : null %}",
+                "jurisdiction": "{% $exists($states.result.Item.jurisdiction) ? $states.result.Item.jurisdiction.S : null %}",
                 "productApplied": (
-                    "{% $exists($case.productApplied) ? $case.productApplied.S : null %}"),
+                    "{% $exists($states.result.Item.productApplied) ? $states.result.Item.productApplied.S : null %}"),
                 "declaredIdentity": (
-                    "{% $exists($case.declaredIdentity) ? {"
-                    "'surname': $case.declaredIdentity.M.surname.S, "
-                    "'givenNames': $case.declaredIdentity.M.givenNames.S, "
-                    "'dateOfBirth': $case.declaredIdentity.M.dateOfBirth.S, "
-                    "'nationality': $case.declaredIdentity.M.nationality.S, "
-                    "'address': $exists($case.declaredIdentity.M.address) ? "
-                    "$case.declaredIdentity.M.address.S : null"
+                    "{% $exists($states.result.Item.declaredIdentity) ? {"
+                    "'surname': $states.result.Item.declaredIdentity.M.surname.S, "
+                    "'givenNames': $states.result.Item.declaredIdentity.M.givenNames.S, "
+                    "'dateOfBirth': $states.result.Item.declaredIdentity.M.dateOfBirth.S, "
+                    "'nationality': $states.result.Item.declaredIdentity.M.nationality.S, "
+                    "'address': $exists($states.result.Item.declaredIdentity.M.address) ? "
+                    "$states.result.Item.declaredIdentity.M.address.S : null"
                     "} : null %}"),
                 # `$map` with an explicit lambda, not `array.{...}` — JSONata's object-constructor
                 # chained off an array performs a *grouping* reduction, not a per-item map, and
@@ -273,21 +293,21 @@ def phase1_definition(
                 # inconsistency that produces intermittent tool-call failures, so the wrapping
                 # brackets make the shape an array unconditionally, regardless of count.
                 "documents": (
-                    "{% $exists($case.documents) ? [$map($case.documents.L, function($d) {"
+                    "{% $exists($states.result.Item.documents) ? [$map($states.result.Item.documents.L, function($d) {"
                     "{'type': $d.M.type.S, 'bucket': $d.M.bucket.S, 'key': $d.M.key.S, "
                     "'issuingCountry': $d.M.issuingCountry.S}"
                     "})] : [] %}"),
                 "liveness": (
-                    "{% $exists($case.liveness) ? {"
-                    "'result': $case.liveness.M.result.S, "
-                    "'region': $case.liveness.M.region.S, "
-                    "'referenceImageKey': $exists($case.liveness.M.referenceImageKey) and "
-                    "$case.liveness.M.referenceImageKey.S != '' ? "
-                    "$case.liveness.M.referenceImageKey.S : null"
+                    "{% $exists($states.result.Item.liveness) ? {"
+                    "'result': $states.result.Item.liveness.M.result.S, "
+                    "'region': $states.result.Item.liveness.M.region.S, "
+                    "'referenceImageKey': $exists($states.result.Item.liveness.M.referenceImageKey) and "
+                    "$states.result.Item.liveness.M.referenceImageKey.S != '' ? "
+                    "$states.result.Item.liveness.M.referenceImageKey.S : null"
                     "} : null %}"),
                 "documentExtraction": (
-                    "{% $exists($case.documentExtraction) ? "
-                    "$parse($case.documentExtraction.S) : null %}"),
+                    "{% $exists($states.result.Item.documentExtraction) ? "
+                    "$parse($states.result.Item.documentExtraction.S) : null %}"),
             },
         },
         "Next": "CheckIdempotency",
@@ -557,7 +577,14 @@ def phase1_definition(
                 ":state": {"S": "PROVISIONAL"},
                 ":d": {"S": "{% $string($decision) %}"},
                 ":dc": {"N": "{% $string($decision.tierInputs.document_confidence) %}"},
-                ":vc": {"BOOL": "{% $decision.tierInputs.velocity_critical %}"},
+                # "Bool", not "BOOL". Step Functions normalises DynamoDB AttributeValue member
+                # names to PascalCase and rejects the wire-format spelling outright:
+                # 'The field "BOOL" is not supported by Step Functions. Did you mean \'Bs\'?'
+                # Only reachable once a case actually earns a provisional approval, so the two
+                # bugs upstream of here (the null caseView and the unguarded jurisdictionRisk)
+                # kept this line from ever executing — it surfaced on the first run where a
+                # clean applicant got as far as OpenProvisional.
+                ":vc": {"Bool": "{% $decision.tierInputs.velocity_critical %}"},
                 # Feeds the phase2Pending GSI so a Phase 2 that never starts is detectable
                 # rather than merely absent.
                 ":p": {"S": "PENDING"},
@@ -599,6 +626,15 @@ def phase1_definition(
         },
         "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 3,
                    "BackoffRate": 2.0}],
+        # The decision id is MINTED HERE, by the audit writer, and returned in its result — the
+        # decision engine never produces one (`audit_lambda` does
+        # `str(decision.get("decisionId") or uuid.uuid4())`). `TriggerPhase2` used to read
+        # `$decision.decisionId`, which is always undefined, so its two JSONata expressions failed
+        # with States.QueryEvaluationError and every provisionally-approved case ended at
+        # `Phase2NotStarted`: the account was open, the record written, and Phase 2 never ran.
+        # Reachable only once a case could actually earn a provisional approval, which is why it had
+        # never fired.
+        "Assign": {"provisionalDecisionId": "{% $states.result.Payload.decisionId %}"},
         # An audit write that fails must not silently drop. It routes to review so a human sees
         # a decided case with no record, which is a compliance event in its own right (R18.3).
         "Catch": _catch("AuditWriteFailed"),
@@ -627,11 +663,26 @@ def phase1_definition(
             "StateMachineArn": phase2_state_machine_arn,
             "Input": {
                 "applicantId": "{% $applicantId %}",
-                "provisionalDecisionId": "{% $decision.decisionId %}",
+                "provisionalDecisionId": "{% $provisionalDecisionId %}",
             },
-            # Idempotent on applicantId + provisionalDecisionId (R21.7): a duplicate
-            # StartExecution with the same name is rejected rather than running screening twice.
-            "Name": "{% $applicantId & '-' & $decision.decisionId %}",
+            # Idempotent on the provisional decision (R21.7): a duplicate StartExecution with the
+            # same name is rejected rather than running screening twice.
+            #
+            # The decision id ALONE, not `applicantId & '-' & decisionId`. Step Functions caps an
+            # execution name at 80 characters, and a real Cognito-derived applicant id is 76 of
+            # them, so the combined name was 113 and every real applicant failed with
+            # `StepFunctions.ValidationException: ... 'name' failed to satisfy constraint: Member
+            # must have length less than or equal to 80` -> retries exhausted -> Phase2NotStarted:
+            # provisional account open, audit record written, screening never run.
+            #
+            # It survived every one of my own tests because synthetic ids were short
+            # ("APP-act1-wuq51frrm2", 19 chars) and stayed under the cap. Only a real applicant id
+            # crosses it — the reason a green synthetic run proves nothing about production data.
+            #
+            # Dropping the applicant id loses nothing: `decisionId` is a uuid4 minted per decision
+            # by the audit writer, so it is already globally unique, and uniqueness is the entire
+            # job of this name. The applicant is still recoverable from the execution's input.
+            "Name": "{% $provisionalDecisionId %}",
         },
         "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 3,
                    "BackoffRate": 2.0}],
@@ -762,13 +813,13 @@ def phase2_definition(
             # nothing.
             "caseView": {
                 "applicantId": "{% $states.input.applicantId %}",
-                "jurisdiction": "{% $exists($case.jurisdiction) ? $case.jurisdiction.S : null %}",
+                "jurisdiction": "{% $exists($states.result.Item.jurisdiction) ? $states.result.Item.jurisdiction.S : null %}",
                 "declaredIdentity": (
-                    "{% $exists($case.declaredIdentity) ? {"
-                    "'surname': $case.declaredIdentity.M.surname.S, "
-                    "'givenNames': $case.declaredIdentity.M.givenNames.S, "
-                    "'dateOfBirth': $case.declaredIdentity.M.dateOfBirth.S, "
-                    "'nationality': $case.declaredIdentity.M.nationality.S"
+                    "{% $exists($states.result.Item.declaredIdentity) ? {"
+                    "'surname': $states.result.Item.declaredIdentity.M.surname.S, "
+                    "'givenNames': $states.result.Item.declaredIdentity.M.givenNames.S, "
+                    "'dateOfBirth': $states.result.Item.declaredIdentity.M.dateOfBirth.S, "
+                    "'nationality': $states.result.Item.declaredIdentity.M.nationality.S"
                     "} : null %}"),
             },
         },
@@ -964,7 +1015,27 @@ def _decision_engine_task(
     payload: dict[str, Any] = {
         "phase": phase,
         "edgeFacts": "{% $exists($case.edgeFacts) ? $case.edgeFacts : {} %}",
-        "jurisdictionRisk": "{% $case.jurisdictionRisk.S %}",
+        "jurisdictionRisk": (
+            # Guarded, and defaulted to LOW to match `edge_cases.py`'s own
+            # `risk_by_code.get(code, RiskTier.LOW)` precedent for an unrecorded jurisdiction.
+            #
+            # Unguarded, this single expression made Phase 1 incapable of ever auto-approving.
+            # Nothing in the system writes `jurisdictionRisk` onto the case record — it is read
+            # here and by the decision engine, and written nowhere — so JSONata returned
+            # undefined, `PreliminaryTier` died with States.QueryEvaluationError, the catch sent
+            # every case to DegradedPath -> ManualReview, and the 90-second path was
+            # unreachable for *all* applicants. Confirmed live: a clean case whose passport MRZ
+            # parsed with valid check digits and whose liveness returned PASS still degraded.
+            #
+            # The neighbouring `edgeFacts` line already uses this `$exists` form; this one did
+            # not, which is the whole defect.
+            #
+            # NOTE (needs compliance sign-off): defaulting an absent jurisdiction risk to LOW
+            # is a fail-OPEN. It is safe only because `CheckJurisdiction` has already rejected
+            # anything outside the four supported jurisdictions before this state is reached.
+            # The durable fix is for case creation to set `jurisdictionRisk` from a maintained
+            # jurisdiction risk list; this guard stops the crash, it does not supply real risk.
+            "{% $exists($case.jurisdictionRisk) ? $case.jurisdictionRisk.S : 'LOW' %}"),
         "productApplied": "{% $case.productApplied.S %}",
         # R11.13 / F-89. The structured findings each agent recorded through its `submit_*`
         # contract tool, re-read from the case record. This is the deterministic channel: the tool
@@ -1039,7 +1110,7 @@ def _decision_engine_task(
         # nobody ever measured.
         payload["documentConfidence"] = "{% $number($case.documentConfidence.N) %}"
         payload["velocitySignals"] = (
-            "{% {'critical': $case.velocityCritical.BOOL} %}")
+            "{% {'critical': $case.velocityCritical.Bool} %}")
         payload["pepStatus"] = (
             "{% $exists($complianceResult.pepStatus) ? $complianceResult.pepStatus : 'NONE' %}")
         payload["adverseMediaSeverity"] = (
@@ -1150,5 +1221,408 @@ def _review_task(queue_url: str, *, next_state: str, catch_to: str) -> dict[str,
             {"ErrorEquals": [REVIEW_UNRESUMABLE, "States.Timeout"], "Next": catch_to},
             {"ErrorEquals": ["States.ALL"], "Next": catch_to},
         ],
+        "Next": next_state,
+    }
+
+
+def phase3_definition(
+    *,
+    case_table: str,
+    history_table: str,
+    decision_engine_arn: str,
+    audit_writer_arn: str,
+    review_queue_url: str,
+    fraud_harness_arn: str,
+    fraud_model_id: str,
+) -> dict[str, Any]:
+    """Phase 3 — lifecycle re-assessment (the day-12 flow). G-01, R21, R31.
+
+    Two structural decisions carry the whole flow, and both are the opposite of Phase 1's.
+
+    **STANDARD, not Express.** A lifecycle execution may sit in a `Wait` for months until the next
+    re-KYC date, and Express caps at five minutes and is at-least-once. Standard is also what makes
+    the idempotency work: `StartExecution` is idempotent for STANDARD on the same name **and** the
+    same input, so a replayed `TransactionRiskEvent` collapses onto the original execution instead
+    of producing a second, different decision. The execution name is computed by the decision engine
+    (`lifecycle.idempotency_name`) rather than composed in JSONata here — the same reasoning as
+    F-89, that a correctness-critical string belongs in tested Python, not in a template expression
+    nobody can unit test.
+
+    **The write is an INSERT, never an update.** `PutItem` with
+    `ConditionExpression: attribute_not_exists(sk)` against the history table. Two consequences,
+    and the second is the point of the flow: a duplicate event cannot append a second row for the
+    same event, and the day-zero decision is structurally unreachable — there is no code path here
+    that can modify it, because the only write this graph performs is a create.
+
+    `.waitForTaskToken` is deliberately absent on the agent invocation: Step Functions'
+    `invokeHarness` integration is Request-Response only (F-12), so the callback pattern is not
+    available and the task caps at 15 minutes regardless of `TimeoutSeconds` (F-14). A harness that
+    outlives its caller keeps running, so every state below is written to tolerate arriving late.
+    """
+    states: dict[str, Any] = {}
+
+    # The day-zero decision, read but never written. `ConsistentRead` because a re-assessment
+    # triggered seconds after a Phase 2 decision would otherwise read the pre-decision copy and
+    # compare against a tier that has already moved.
+    states["LoadDayZero"] = {
+        "Type": "Task",
+        "QueryLanguage": "JSONata",
+        "Resource": "arn:aws:states:::aws-sdk:dynamodb:getItem",
+        "Arguments": {
+            "TableName": case_table,
+            "Key": {
+                "applicantId": {"S": "{% $states.input.detail.customerId %}"},
+                "sk": {"S": "CASE"},
+            },
+            "ConsistentRead": True,
+        },
+        "Assign": {
+            "riskEvent": "{% $states.input.detail %}",
+            "case": "{% $states.result.Item %}",
+            # Absent rather than defaulted. An event for a customer with no case is a routing bug,
+            # and inventing a version 1 here would append a decision to a case that never existed.
+            "day0Version": (
+                "{% $exists($states.result.Item.decisionVersion) ? "
+                "$number($states.result.Item.decisionVersion.N) : 1 %}"),
+        },
+        "Catch": _catch("EventUnroutable"),
+        "Next": "CheckCaseExists",
+    }
+
+    # A missing case is not a re-assessment. Fail loudly rather than fabricating a day zero.
+    states["CheckCaseExists"] = {
+        "Type": "Choice",
+        "QueryLanguage": "JSONata",
+        "Choices": [{
+            "Condition": "{% $not($exists($case.applicantId)) %}",
+            "Next": "EventUnroutable",
+        }],
+        "Default": "ReScreenFraud",
+    }
+
+    # The re-screen. This is where a top-tier Nova belongs: Phase 3 is asynchronous and off the
+    # 90-second budget entirely, so the latency cost of a stronger model buys accuracy for free —
+    # the same argument that put `high` reasoning effort on Phase 2's Compliance Risk agent (D-08).
+    fraud_agent = next(a for a in AGENTS if a.key == "fraud")
+    states["ReScreenFraud"] = agent_task(
+        fraud_agent,
+        harness_arn=fraud_harness_arn,
+        model_id=fraud_model_id,
+        prompt_expression=(
+            "{% 'Re-assess this approved customer against a new risk event. Report signals only; "
+            "the decision is not yours to make. Event: ' & $string($riskEvent) & "
+            "' Case: ' & $string($case) %}"),
+        next_state="ExtractFindings",
+        catch_to="ReScreenIncomplete",
+        # Off the 90-second critical path, so the ceiling is generous rather than tight: an
+        # over-running re-screen should degrade to SYSTEM_ERROR and a human, not to a timeout that
+        # loses the event. Same reasoning as Phase 2's 600s (D-08).
+        timeout_seconds=600,
+    )
+
+    # Re-read the case so the structured `submit_fraud_assessment` finding the agent just wrote is
+    # visible. Same reason as Phase 1's ReloadFindings: the copy loaded at LoadDayZero predates the
+    # agent, so it necessarily has no finding in it.
+    states["ExtractFindings"] = {
+        "Type": "Task",
+        "QueryLanguage": "JSONata",
+        "Resource": "arn:aws:states:::aws-sdk:dynamodb:getItem",
+        "Arguments": {
+            "TableName": case_table,
+            "Key": {
+                "applicantId": {"S": "{% $riskEvent.customerId %}"},
+                "sk": {"S": "CASE"},
+            },
+            "ConsistentRead": True,
+        },
+        "Assign": {"case": "{% $states.result.Item %}"},
+        "Catch": _catch("ReScreenIncomplete"),
+        "Next": "Reassess",
+    }
+
+    # `evidenceComplete: true` is the assertion that the re-screen produced a finding. When
+    # ReScreenIncomplete routes here instead, it is false, and the engine returns SYSTEM_ERROR
+    # rather than "risk unchanged" — an unavailable control is never a clean result (R25.7).
+    states["Reassess"] = _phase3_engine_task(
+        decision_engine_arn, evidence_complete=True,
+        next_state="AppendDecision", catch_to="ReassessFailed")
+
+    states["ReScreenIncomplete"] = _phase3_engine_task(
+        decision_engine_arn, evidence_complete=False,
+        next_state="AppendDecision", catch_to="ReassessFailed")
+
+    # The append. `attribute_not_exists(sk)` is what makes this idempotent AND what makes the
+    # history immutable: the only write in this graph creates a row, so there is no path that can
+    # edit the day-zero decision. A replayed event fails the condition and lands in
+    # DuplicateEventIgnored, which is a success — the decision already exists.
+    states["AppendDecision"] = {
+        "Type": "Task",
+        "QueryLanguage": "JSONata",
+        "Resource": "arn:aws:states:::aws-sdk:dynamodb:putItem",
+        "Arguments": {
+            "TableName": history_table,
+            "Item": {
+                "customerId": {"S": "{% $riskEvent.customerId %}"},
+                # Computed by the engine (`lifecycle.history_sort_key`) so the zero-padding that
+                # keeps version 10 sorting after version 2 is covered by a unit test.
+                "sk": {"S": "{% $decision.historySortKey %}"},
+                "caseId": {"S": "{% $case.caseId.S %}"},
+                "eventId": {"S": "{% $riskEvent.eventId %}"},
+                "eventType": {"S": "{% $riskEvent.eventType %}"},
+                "outcome": {"S": "{% $decision.outcome %}"},
+                "day0Tier": {"S": "{% $decision.day0Tier %}"},
+                "newTier": {"S": "{% $decision.newTier %}"},
+                # `Bool`, not `BOOL`. Step Functions normalises DynamoDB AttributeValue member
+                # names to PascalCase for its aws-sdk integration and rejects the wire-format
+                # spelling outright ("The field \"BOOL\" is not supported by Step Functions").
+                # Found by the first live execution, not by synth — the template is valid
+                # CloudFormation either way, so only a real run surfaces it.
+                "riskChanged": {"Bool": "{% $decision.riskChanged %}"},
+                "version": {"N": "{% $string($decision.version) %}"},
+                "decidedAt": {"S": "{% $decision.decidedAt %}"},
+                "explanation": {"S": "{% $decision.explanation %}"},
+            },
+            "ConditionExpression": "attribute_not_exists(sk)",
+        },
+        "Catch": [{
+            # The conditional-check failure is the expected outcome of a replay, not an error.
+            "ErrorEquals": ["DynamoDb.ConditionalCheckFailedException"],
+            "Next": "DuplicateEventIgnored",
+        }] + _catch("ReassessFailed"),
+        "Next": "RecordAudit",
+    }
+
+    states["RecordAudit"] = {
+        "Type": "Task",
+        "QueryLanguage": "JSONata",
+        "Resource": "arn:aws:states:::lambda:invoke",
+        "Arguments": {
+            "FunctionName": audit_writer_arn,
+            "Payload": {
+                "phase": 3,
+                "caseId": "{% $case.caseId.S %}",
+                "customerId": "{% $riskEvent.customerId %}",
+                "eventId": "{% $riskEvent.eventId %}",
+                "decision": "{% $decision %}",
+            },
+        },
+        "Catch": _catch("RouteOutcome"),
+        "Next": "RouteOutcome",
+    }
+
+    # Only the *current* view moves. The day-zero row is untouched by every branch below.
+    states["RouteOutcome"] = {
+        "Type": "Choice",
+        "QueryLanguage": "JSONata",
+        "Choices": [
+            {"Condition": "{% $decision.outcome = 'FREEZE' %}", "Next": "FreezeAccount"},
+            {"Condition": "{% $decision.outcome = 'RISK_INCREASED_REVIEW' %}",
+             "Next": "EscalateToReview"},
+            {"Condition": "{% $decision.outcome = 'RISK_INCREASED_RESTRICT' %}",
+             "Next": "ReapplyRestrictions"},
+            {"Condition": "{% $decision.outcome = 'SYSTEM_ERROR' %}",
+             "Next": "EscalateToReview"},
+        ],
+        "Default": "UpdateRiskState",
+    }
+
+    # Each terminal risk state is written by exactly one state and then STOPS. An earlier version
+    # chained ReapplyRestrictions -> UpdateRiskState, which wrote RESTRICTED and then immediately
+    # overwrote it with MONITORING — the restriction was applied and lifted in the same execution.
+    # The synth test `test_no_failure_path_reaches_a_state_that_lifts_a_restriction` is what caught
+    # it, which is the argument for asserting negative properties rather than smoke-testing.
+    states["FreezeAccount"] = _set_risk_state(
+        case_table, state="FROZEN", next_state="EscalateToReview",
+        # A failed freeze still reaches a human. Escalation changes no risk state, so it cannot
+        # relax anything; silently continuing would leave a customer unfrozen with no alert.
+        catch_to="EscalateToReview")
+    states["ReapplyRestrictions"] = _set_risk_state(
+        case_table, state="RESTRICTED", next_state="Done", catch_to="EscalateToReview")
+    states["UpdateRiskState"] = _set_risk_state(
+        case_table, state="MONITORING", next_state="Done", catch_to="Done")
+
+    states["EscalateToReview"] = {
+        "Type": "Task",
+        "QueryLanguage": "JSONata",
+        "Resource": "arn:aws:states:::sqs:sendMessage",
+        "Arguments": {
+            "QueueUrl": review_queue_url,
+            "MessageBody": {
+                "phase": 3,
+                "reason": "{% $decision.outcome %}",
+                "customerId": "{% $riskEvent.customerId %}",
+                "caseId": "{% $case.caseId.S %}",
+                "eventId": "{% $riskEvent.eventId %}",
+                "explanation": "{% $decision.explanation %}",
+            },
+        },
+        "Catch": _catch("Done"),
+        "Next": "Done",
+    }
+
+    # Terminal states. A duplicate is a Succeed, not a Fail: the decision it would have written
+    # already exists, so the system is in the intended state and paging someone would be noise.
+    states["DuplicateEventIgnored"] = {"Type": "Succeed"}
+    states["Done"] = {"Type": "Succeed"}
+    states["EventUnroutable"] = {
+        "Type": "Fail",
+        "Error": "EventUnroutable",
+        "Cause": "No case exists for this customer; the risk event cannot be assessed.",
+    }
+    states["ReassessFailed"] = {
+        "Type": "Fail",
+        "Error": "ReassessFailed",
+        "Cause": "Re-assessment could not complete. The day-zero decision is unchanged.",
+    }
+
+    return {
+        "Comment": "Phase 3 — lifecycle re-assessment. Appends a decision; never rewrites day zero.",
+        "QueryLanguage": "JSONata",
+        "StartAt": "LoadDayZero",
+        "States": states,
+    }
+
+
+def _phase3_engine_task(
+    function_arn: str, *, evidence_complete: bool, next_state: str, catch_to: str
+) -> dict[str, Any]:
+    """Invoke the decision engine in Phase-3 mode.
+
+    `evidenceComplete` is passed explicitly rather than inferred from whether a finding happens to
+    be present. The engine treats `false` as "the control did not run" and returns SYSTEM_ERROR;
+    letting it guess from an absent field would make a parsing failure indistinguishable from a
+    completed clean re-screen, which is the F-89 mistake in a different costume.
+    """
+    payload: dict[str, Any] = {
+        "phase": 3,
+        # The engine owns the clock for the record; the state machine supplies it because the rule
+        # layer is pure and cannot read one (design §8).
+        "decidedAt": "{% $states.context.Execution.StartTime %}",
+        "evidenceComplete": evidence_complete,
+        "riskEvent": "{% $riskEvent %}",
+        "day0": {
+            "caseId": "{% $case.caseId.S %}",
+            # Read from where the day-zero decision actually is. `fullTier`, `decision` and
+            # `decidedAt` are attributes nothing ever writes: the decision lives in the `phase1`
+            # (or `phase2`) JSON string, and its timestamp in `provisionalDecidedAt`. Unguarded,
+            # all three returned undefined and `Reassess` died with States.QueryEvaluationError,
+            # so every lifecycle re-assessment ended at `ReassessFailed` — "Re-assessment could
+            # not complete. The day-zero decision is unchanged."
+            #
+            # Phase 2 wins over Phase 1 when present: a full-tier decision supersedes the
+            # provisional one, and re-assessing against the superseded tier would compare today's
+            # risk to a decision that no longer stands.
+            "tier": ("{% $exists($case.phase2) ? $parse($case.phase2.S).tier : "
+                     "($exists($case.phase1) ? $parse($case.phase1.S).tier : null) %}"),
+            "outcome": ("{% $exists($case.phase2) ? $parse($case.phase2.S).outcome : "
+                        "($exists($case.phase1) ? $parse($case.phase1.S).outcome : null) %}"),
+            "decidedAt": ("{% $exists($case.fullDecidedAt) ? $case.fullDecidedAt.S : "
+                          "($exists($case.provisionalDecidedAt) ? "
+                          "$case.provisionalDecidedAt.S : null) %}"),
+            "version": "{% $day0Version %}",
+        },
+    }
+    if evidence_complete:
+        payload.update({
+            "jurisdictionRisk": (
+            # Guarded, and defaulted to LOW to match `edge_cases.py`'s own
+            # `risk_by_code.get(code, RiskTier.LOW)` precedent for an unrecorded jurisdiction.
+            #
+            # Unguarded, this single expression made Phase 1 incapable of ever auto-approving.
+            # Nothing in the system writes `jurisdictionRisk` onto the case record — it is read
+            # here and by the decision engine, and written nowhere — so JSONata returned
+            # undefined, `PreliminaryTier` died with States.QueryEvaluationError, the catch sent
+            # every case to DegradedPath -> ManualReview, and the 90-second path was
+            # unreachable for *all* applicants. Confirmed live: a clean case whose passport MRZ
+            # parsed with valid check digits and whose liveness returned PASS still degraded.
+            #
+            # The neighbouring `edgeFacts` line already uses this `$exists` form; this one did
+            # not, which is the whole defect.
+            #
+            # NOTE (needs compliance sign-off): defaulting an absent jurisdiction risk to LOW
+            # is a fail-OPEN. It is safe only because `CheckJurisdiction` has already rejected
+            # anything outside the four supported jurisdictions before this state is reached.
+            # The durable fix is for case creation to set `jurisdictionRisk` from a maintained
+            # jurisdiction risk list; this guard stops the crash, it does not supply real risk.
+            "{% $exists($case.jurisdictionRisk) ? $case.jurisdictionRisk.S : 'LOW' %}"),
+            "productApplied": "{% $case.productApplied.S %}",
+            "findings": (
+                "{% {'fraud': $exists($case.findingFraud) ? $case.findingFraud.S : null} %}"),
+            "pepStatus": (
+                "{% $exists($case.pepStatus) ? $case.pepStatus.S : 'NONE' %}"),
+            "adverseMediaSeverity": (
+                "{% $exists($case.adverseMediaSeverity) ? "
+                "$case.adverseMediaSeverity.S : 'NONE' %}"),
+            "screeningHits": (
+                "{% $exists($case.screeningHits) ? $case.screeningHits : [] %}"),
+            # Guarded. `customerAge` is written by nothing in this system and read by nothing
+            # in the decision engine either — it is a vestigial payload field. Unguarded it
+            # was fatal: JSONata returned undefined, `Reassess` died with
+            # States.QueryEvaluationError, and every Phase 3 re-assessment ended at
+            # `ReassessFailed` ("Re-assessment could not complete"). The one run that ever
+            # succeeded used a hand-seeded case that happened to carry the attribute, which is
+            # exactly why a green result on seeded data is not evidence about real data.
+            "customerAge": ("{% $exists($case.customerAge) ? "
+                            "$number($case.customerAge.N) : null %}"),
+            # `.Bool`, not `.BOOL`. Step Functions' aws-sdk DynamoDB integration returns
+            # AttributeValue members in PascalCase on the way OUT as well as in: a real getItem
+            # returned `{'Bool': False}`. Reading `.BOOL` yields undefined, and JSONata fails the
+            # whole state on undefined (not null), so the case died at QueryEvaluationError. The
+            # same latent spelling existed in `_decision_engine_task` for velocityCritical and is
+            # fixed there too — it only fires when that attribute is present on the case.
+                        # Guarded, and null rather than false. Nothing writes `preScreenMatched` to the
+            # case record, so unguarded this was the next QueryEvaluationError waiting
+            # behind `customerAge` — found by extending the unguarded-read test to phase 3
+            # rather than by another failed live run. Null so the engine treats an
+            # unknown screening result as undetermined; `false` would assert "no sanctions
+            # match" on no evidence, which is a fail-OPEN on the one check that must not.
+            "preScreenMatched": ("{% $exists($case.preScreenMatched) ? "
+                                 "$case.preScreenMatched.Bool : null %}"),
+            "documentConfidence": "{% $number($case.documentConfidence.N) %}",
+            "velocitySignals": "{% {'critical': false, 'detail': []} %}",
+        })
+    return {
+        "Type": "Task",
+        "QueryLanguage": "JSONata",
+        "Resource": "arn:aws:states:::lambda:invoke",
+        "Arguments": {"FunctionName": function_arn, "Payload": payload},
+        "Assign": {"decision": "{% $states.result.Payload %}"},
+        "Catch": _catch(catch_to),
+        "Next": next_state,
+    }
+
+
+def _set_risk_state(
+    case_table: str, *, state: str, next_state: str, catch_to: str
+) -> dict[str, Any]:
+    """Move the CURRENT risk state on the case. Never touches a decision row.
+
+    This is the one legitimate update in Phase 3 and it is deliberately narrow: it writes
+    `riskState` and `updatedAt` and nothing else. The decision history is append-only and lives in
+    a separate table, so this cannot reach it even by accident.
+    """
+    return {
+        "Type": "Task",
+        "QueryLanguage": "JSONata",
+        "Resource": "arn:aws:states:::aws-sdk:dynamodb:updateItem",
+        "Arguments": {
+            "TableName": case_table,
+            "Key": {
+                "applicantId": {"S": "{% $riskEvent.customerId %}"},
+                "sk": {"S": "CASE"},
+            },
+            "UpdateExpression": (
+                "SET riskState = :s, decisionVersion = :v, updatedAt = :t"),
+            "ExpressionAttributeValues": {
+                ":s": {"S": state},
+                ":v": {"N": "{% $string($decision.version) %}"},
+                ":t": {"S": "{% $states.context.Execution.StartTime %}"},
+            },
+        },
+        # Explicit rather than defaulting to `next_state`. Reusing next_state here is how a
+        # restriction-lifting path hid: a failed ReapplyRestrictions fell through into the state
+        # that writes MONITORING. A Catch must never land somewhere less restrictive than the
+        # state that failed.
+        "Catch": _catch(catch_to),
         "Next": next_state,
     }

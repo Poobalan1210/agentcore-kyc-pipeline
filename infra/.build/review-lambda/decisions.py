@@ -202,6 +202,31 @@ class TableKeySchema:
     case_sort_value: str = "CASE"
 
 
+
+def to_attribute_value(value: Any) -> Any:
+    """Plain Python -> a DynamoDB AttributeValue, recursively.
+
+    Pass-through for a value that is already an AttributeValue, so serializing twice is harmless —
+    the alternative is a double-wrapped `{"M": {"S": ...}}` that DynamoDB accepts and stores as
+    garbage, which is far worse than a redundant call.
+    """
+    if isinstance(value, Mapping):
+        if len(value) == 1:
+            (member, _), = value.items()
+            if member in ("S", "N", "B", "SS", "NS", "BS", "M", "L", "NULL", "BOOL", "Bool"):
+                return value
+        return {"M": {k: to_attribute_value(v) for k, v in value.items()}}
+    if isinstance(value, bool):
+        # Before the int branch: bool is a subclass of int and would serialize as a number.
+        return {"BOOL": value}
+    if value is None:
+        return {"NULL": True}
+    if isinstance(value, (int, float)):
+        return {"N": str(value)}
+    if isinstance(value, (list, tuple)):
+        return {"L": [to_attribute_value(v) for v in value]}
+    return {"S": str(value)}
+
 @dataclass(frozen=True, kw_only=True)
 class ConditionalWrite:
     """A ready-to-pass `update_item` request. Built here so the guard can be asserted in tests."""
@@ -214,6 +239,12 @@ class ConditionalWrite:
     expression_attribute_values: Mapping[str, Any]
 
     def to_request(self) -> dict[str, Any]:
+        """The `update_item` kwargs in PLAIN Python values.
+
+        Deliberately not AttributeValue-serialized: this module is pure functions over plain values,
+        which is what makes the decision rules testable, so the DynamoDB wire format is applied at
+        the caller's boundary (`review_handler.apply_decision`) via `to_attribute_value`.
+        """
         return {
             "TableName": self.table_name,
             "Key": dict(self.key),
@@ -245,11 +276,18 @@ def to_utc_iso(moment: datetime) -> str:
 
 
 def existing_review(case: Mapping[str, Any], phase: str) -> RecordedDecision | None:
-    """The review decision already stored for this phase, if any (Property 10)."""
-    phase_block = case.get(phase)
-    if not isinstance(phase_block, Mapping):
-        return None
-    stored = phase_block.get("review")
+    """The review decision already stored for this phase, if any (Property 10).
+
+    Reads the sibling `<phase>Review` attribute the write targets, and still accepts the older
+    nested `<phase>.review` form so a case decided before that change is not misread as undecided —
+    which would let a second reviewer overwrite a real decision.
+    """
+    stored: Any = case.get(f"{phase}Review")
+    if not isinstance(stored, Mapping) or not stored:
+        phase_block = case.get(phase)
+        if not isinstance(phase_block, Mapping):
+            return None
+        stored = phase_block.get("review")
     if not isinstance(stored, Mapping) or not stored:
         return None
     return recorded_from_item(stored)
@@ -391,10 +429,19 @@ def build_conditional_write(
 
     Three clauses in the condition, each for a distinct failure:
 
-    * `attribute_not_exists(#phase.#review)` — the race itself. The second writer fails here.
+    * `attribute_not_exists(#reviewAttr)` — the race itself. The second writer fails here.
     * `#state = :awaiting` — the case has not moved on since it was read.
-    * `attribute_exists(#phase)` — a nested `SET` into an absent map raises a *ValidationException*,
-      not a conditional failure, which would surface as a 500 instead of a clean conflict.
+    * `attribute_exists(#phase)` — the phase must have run before it can be reviewed.
+
+    The decision is written to a **sibling** attribute (`phase1Review`, `phase2Review`), not nested
+    as `phase1.review`. `asl.py`'s `OpenProvisional` stores `phase1` as a JSON *string* — the same
+    convention it uses for `phase1Evidence` and `documentExtraction` — and a nested `SET` into a
+    string is not a valid document path: DynamoDB rejects it with
+    `ValidationException: The document path provided in the update expression is invalid for update`,
+    so every reviewer decision returned 500. Found only end to end, because no reviewer could obtain
+    a task token to submit one until the token source was fixed. A sibling attribute keeps the
+    orchestrator's storage convention intact instead of forcing the ASL to emit a deeply nested
+    DynamoDB Map from JSONata.
 
     All of it is one `update_item` on one item on purpose. Splitting the decision write from the
     state transition would open a window in which a case is decided but not transitioned, and no
@@ -402,7 +449,7 @@ def build_conditional_write(
     """
     names = {
         "#phase": submission.phase,
-        "#review": "review",
+        "#reviewAttr": f"{submission.phase}Review",
         "#state": "state",
         "#transitions": "transitions",
     }
@@ -422,12 +469,14 @@ def build_conditional_write(
     }
     return ConditionalWrite(
         table_name=table_name,
+        # Plain values: `ConditionalWrite.to_request` serializes to AttributeValues at the
+        # boundary, so nothing in this module has to carry the wire format.
         key={keys.partition_key: submission.applicant_id, keys.sort_key: keys.case_sort_value},
         update_expression=(
-            "SET #phase.#review = :decision, #state = :target, "
+            "SET #reviewAttr = :decision, #state = :target, "
             "#transitions = list_append(if_not_exists(#transitions, :empty), :transition)"),
         condition_expression=(
-            "attribute_exists(#phase) AND attribute_not_exists(#phase.#review) "
+            "attribute_exists(#phase) AND attribute_not_exists(#reviewAttr) "
             "AND #state = :awaiting"),
         expression_attribute_names=names,
         expression_attribute_values=values,

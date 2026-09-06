@@ -278,7 +278,9 @@ class TestConditionalWrite:
 
     def test_the_condition_guards_against_an_existing_review(self):
         # This clause *is* first-writer-wins. Without it the second write silently overwrites.
-        assert "attribute_not_exists(#phase.#review)" in self.build().condition_expression
+        # Guards the sibling attribute the decision is written to, not a nested path into the
+        # phase blob (which `asl.py` stores as a JSON string).
+        assert "attribute_not_exists(#reviewAttr)" in self.build().condition_expression
 
     def test_the_condition_guards_the_case_state(self):
         write = self.build()
@@ -294,7 +296,12 @@ class TestConditionalWrite:
         # Two writes would open a window where a case is decided but not transitioned, and no
         # condition spanning two writes can close it.
         update = self.build().update_expression
-        assert "#phase.#review = :decision" in update
+        # A SIBLING attribute, not `#phase.#review`: `asl.py` stores `phase1` as a JSON string, and
+        # a nested SET into a string is rejected with
+        # "The document path provided in the update expression is invalid for update" — which made
+        # every reviewer decision a 500.
+        assert "#reviewAttr = :decision" in update
+        assert "#phase.#review" not in update
         assert "#state = :target" in update
         assert "list_append" in update
 
@@ -304,6 +311,12 @@ class TestConditionalWrite:
         assert "phase2" not in write.update_expression
 
     def test_the_key_addresses_the_case_record(self):
+        """Plain values here on purpose.
+
+        `decisions.py` stays pure Python; the DynamoDB wire format is applied at the caller's
+        boundary by `review_handler._serialized_request`. Wrapping in both places would produce a
+        double-wrapped key that DynamoDB accepts and stores as garbage.
+        """
         assert self.build().key == {"applicantId": "APP-001", "sk": "CASE"}
 
     def test_the_request_asks_for_the_winning_item_on_failure(self):

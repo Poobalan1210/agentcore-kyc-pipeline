@@ -50,12 +50,39 @@ class AwsError(Exception):
         self.response = {"Error": {"Code": code, "Message": code}}
 
 
+
+def _wire(value: Any) -> Any:
+    """Plain -> AttributeValue, for what the fake hands back to the code under test."""
+    from decisions import to_attribute_value
+    if isinstance(value, dict):
+        return {k: to_attribute_value(v) for k, v in value.items()}
+    return to_attribute_value(value)
+
+
+def _plain(value: Any) -> Any:
+    """AttributeValue -> plain, for what the fake receives and then stores."""
+    from review_handler import deserialize_item
+    return deserialize_item({"v": value})["v"]
+
+
 class FakeDynamo:
     """A one-item store that honours exactly the two condition clauses the write depends on.
 
     Deliberately not a general expression evaluator: it enforces `attribute_not_exists` on the phase
     review path and equality on `state`, because those are the clauses R6.5 rests on. Anything more
     would be a second implementation to keep correct.
+
+    **Speaks the low-level client's wire format at its boundaries**, because that is what the code
+    under test talks to. It previously accepted and returned plain Python, which is the `Table`
+    resource's shape — so the suite could not see that the real handler passed plain values to a
+    client that rejects them. Three production bugs hid behind exactly that gap: a 500 on
+    `Key.applicantId`, a 500 on `ExpressionAttributeValues.:target`, and a spurious 422
+    `CASE_MISMATCH` from comparing a caseId against `"{'S': 'CASE-...'}"`. All three were invisible
+    here and unreachable in production, because no reviewer could obtain a task token to submit a
+    decision at all.
+
+    The internal store stays plain so tests can assert on readable values; only the get/update
+    boundaries convert.
     """
 
     def __init__(self, item: dict[str, Any] | None = None):
@@ -67,7 +94,14 @@ class FakeDynamo:
 
     def get_item(self, **kwargs: Any) -> dict[str, Any]:
         self.get_calls.append(kwargs)
-        return {"Item": copy.deepcopy(self.item)} if self.item else {}
+        for name, value in (kwargs.get("Key") or {}).items():
+            assert isinstance(value, dict) and len(value) == 1, (
+                f"Key.{name} must be an AttributeValue like {{'S': ...}}, got {value!r} — "
+                f"the low-level client raises ParamValidationError on a bare value"
+            )
+        if not self.item:
+            return {}
+        return {"Item": _wire(copy.deepcopy(self.item))}
 
     def update_item(self, **kwargs: Any) -> dict[str, Any]:
         self.update_calls.append(kwargs)
@@ -77,18 +111,26 @@ class FakeDynamo:
             raise error
 
         names = kwargs["ExpressionAttributeNames"]
-        values = kwargs["ExpressionAttributeValues"]
+        for name, value in (kwargs.get("ExpressionAttributeValues") or {}).items():
+            assert isinstance(value, dict) and len(value) == 1, (
+                f"ExpressionAttributeValues.{name} must be an AttributeValue, got {value!r}"
+            )
+        values = {name: _plain(value)
+                  for name, value in kwargs["ExpressionAttributeValues"].items()}
         phase = names["#phase"]
+        # The decision lands on a SIBLING attribute (`phase1Review`), because `asl.py` stores the
+        # phase blob as a JSON string and a nested SET into a string is an invalid document path.
+        review_attr = names.get("#reviewAttr", f"{phase}Review")
         item = self.item
 
-        if item is None or not isinstance(item.get(phase), dict):
+        if item is None or phase not in item:
             raise ConditionalCheckFailed()
-        if item[phase].get("review"):
-            raise ConditionalCheckFailed(item=copy.deepcopy(item))
+        if item.get(review_attr):
+            raise ConditionalCheckFailed(item=_wire(copy.deepcopy(item)))
         if item.get("state") != values[":awaiting"]:
-            raise ConditionalCheckFailed(item=copy.deepcopy(item))
+            raise ConditionalCheckFailed(item=_wire(copy.deepcopy(item)))
 
-        item[phase]["review"] = copy.deepcopy(values[":decision"])
+        item[review_attr] = copy.deepcopy(values[":decision"])
         item["state"] = values[":target"]
         item.setdefault("transitions", [])
         item["transitions"].extend(copy.deepcopy(values[":transition"]))

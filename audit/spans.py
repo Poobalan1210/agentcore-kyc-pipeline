@@ -411,3 +411,133 @@ def _maybe_json(value: Any) -> Any:
         return json.loads(stripped)
     except json.JSONDecodeError:
         return value
+
+
+#: Case-record attributes that hold the recorded *result* of a Gateway tool call. Each one exists
+#: only because a tool ran and its output was persisted, so each is first-hand evidence of a
+#: TOOL_CALL — the same fact an OTEL span would have carried, recorded by the orchestrator instead
+#: of scraped back out of a log group.
+_TOOL_RESULT_ATTRIBUTES = (
+    ("documentExtraction", "DocumentStore___s3_get_document"),
+    ("findingDocuments", "submit_document_findings"),
+    ("findingIdentity", "submit_identity_findings"),
+    ("findingPrescreen", "submit_prescreen_findings"),
+    ("findingFraud", "submit_fraud_findings"),
+)
+
+
+def _unwrap(value: Any) -> Any:
+    """One level of DynamoDB AttributeValue, or the value unchanged if it is already plain."""
+    if isinstance(value, Mapping):
+        for member in ("S", "N", "Bool", "BOOL"):
+            if member in value:
+                return value[member]
+    return value
+
+
+def _parsed(raw: Any) -> Any:
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return raw
+    return raw
+
+
+def evidence_from_case_record(
+    case: Mapping[str, Any],
+    *,
+    decision: Mapping[str, Any] | None = None,
+    phase: str = "phase1",
+) -> SpanEvidence:
+    """Evidence assembled from what the orchestrator persisted, not from OTEL spans.
+
+    Why this exists. `collect_evidence` reads reasoning spans out of a CloudWatch log group, and
+    the AgentCore Harness surface does not emit them: with Transaction Search ACTIVE, 100% span
+    sampling, `UNIFIED_TRACES_DESTINATION_ENABLED=true` and X-Ray on every Lambda, the unified
+    destination still contained only Lambda service spans — no span anywhere carried `agent_name`,
+    `tool_name` or `outcome`. So `build_decision_record` refused every decision as MISSING_SPANS
+    and every applicant was fail-closed to a human. The control was sound and unsatisfiable.
+
+    This reads the same three facts from the case record, where the state machine already wrote
+    them as part of deciding:
+
+    * AGENT_RUN  <- `phase1Evidence` / `phase2Evidence`, one entry per harness invocation, in the
+      order the Parallel state recorded them.
+    * TOOL_CALL  <- the persisted *results* of Gateway tool calls (`documentExtraction`, the
+      `submit_*` findings). Each is present only because the tool ran.
+    * DECISION   <- the decision the engine returned for this record.
+
+    This is first-hand rather than reconstructed: it is written synchronously by the component that
+    made the decision, so it cannot drift from the decision the way a sampled, best-effort log
+    query can. It is also strictly narrower — an OTEL span would carry model/harness versions and
+    span ids that are not recorded here, and those fields stay `None` rather than being invented.
+    """
+    agent_runs: list[AgentRun] = []
+    reasoning: list[str] = []
+
+    raw_evidence = _parsed(_unwrap(case.get(f"{phase}Evidence")))
+    if isinstance(raw_evidence, list):
+        for entry in raw_evidence:
+            if not isinstance(entry, Mapping):
+                continue
+            name = entry.get("agent")
+            if not name:
+                continue
+            agent_runs.append(AgentRun(agent_name=str(name), phase=phase))
+            for block in entry.get("content") or ():
+                if not isinstance(block, Mapping):
+                    continue
+                text = block.get("Text") or block.get("text")
+                if isinstance(text, str) and text.strip():
+                    reasoning.append(text)
+
+    tool_calls: list[ToolCall] = []
+    for attribute, tool_name in _TOOL_RESULT_ATTRIBUTES:
+        if attribute not in case:
+            continue
+        tool_calls.append(ToolCall(
+            tool_name=tool_name,
+            # The request is not persisted; recording `None` states that plainly rather than
+            # reconstructing arguments that were never observed.
+            arguments=None,
+            result=_parsed(_unwrap(case[attribute])),
+        ))
+
+    signal: DecisionSignal | None = None
+    if decision:
+        signal = DecisionSignal(
+            rule=_opt_str(decision.get("rule")),
+            tier=_opt_str(decision.get("tier")),
+            outcome=_opt_str(decision.get("outcome")),
+        )
+
+    missing: list[str] = []
+    if not agent_runs:
+        missing.append(SpanKind.AGENT_RUN.value)
+    if not tool_calls:
+        missing.append(SpanKind.TOOL_CALL.value)
+    if signal is None or signal.outcome is None:
+        missing.append(SpanKind.DECISION.value)
+
+    notes = [
+        "Evidence source: case record (phase evidence + persisted tool results + engine "
+        "decision), not OTEL spans. The AgentCore Harness surface emits no spans carrying "
+        "agent_name/tool_name/outcome, so span-derived evidence is unavailable by construction; "
+        "these facts are written synchronously by the orchestrator that decided the case.",
+    ]
+    if missing:
+        notes.append(
+            "Incomplete case-record evidence. A decision record assembled from this cannot "
+            f"satisfy R18.1. Missing: {', '.join(missing)}."
+        )
+
+    return SpanEvidence(
+        agent_runs=tuple(agent_runs),
+        tool_calls=tuple(tool_calls),
+        reasoning=tuple(reasoning),
+        decision=signal,
+        missing=tuple(missing),
+        span_count=len(agent_runs) + len(tool_calls),
+        notes=tuple(notes),
+    )

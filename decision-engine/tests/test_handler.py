@@ -92,8 +92,15 @@ class TestRejectsBadInput:
             lambda_handler({"jurisdictionRisk": "LOW"})
 
     def test_bad_phase(self):
+        # Was `phase=3` before Phase 3 (lifecycle re-assessment) existed. Kept as a real
+        # out-of-range value so the guard is still exercised rather than quietly retired.
         with pytest.raises(InputError, match="phase"):
-            lambda_handler(p1(phase=3))
+            lambda_handler(p1(phase=4))
+
+    def test_phase_three_is_accepted_and_needs_a_risk_event(self):
+        """Phase 3 is routed, and its own validation refuses an empty event (G-01)."""
+        with pytest.raises(InputError, match="riskEvent"):
+            lambda_handler({"phase": 3})
 
     @pytest.mark.parametrize("field", [
         "jurisdictionRisk", "preScreenMatched", "documentConfidence",

@@ -21,6 +21,7 @@ from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_kms as kms
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_lambda_event_sources as lambda_sources
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_stepfunctions as sfn
@@ -52,6 +53,7 @@ class OrchestrationStack(Stack):
         # dropping the reference entirely would make CloudFormation try to delete an export that
         # this stack's currently-deployed template still uses, which deadlocks both stacks.
         harness_endpoint_arns: dict[str, str],
+        trace_log_group_names: dict[str, str],
         model_ids: dict[str, str],
         **kwargs,
     ) -> None:
@@ -113,7 +115,21 @@ class OrchestrationStack(Stack):
                 "CASE_TABLE_NAME": case_table_name,
                 "AUDIT_BUCKET_NAME": audit_bucket_name,
                 "AUDIT_KMS_KEY_ID": audit_key_arn,
-                "SPAN_LOG_GROUP": f"/aws/bedrock-agentcore/{PROJECT}",
+                # The real per-agent AgentCore trace groups, comma-separated — NOT a single
+                # guessed group. This was f"/aws/bedrock-agentcore/{PROJECT}", a log group that
+                # does not exist and never did: AgentCore writes to
+                # /aws/bedrock-agentcore/runtimes/<runtimeId>-live, one group per agent. The
+                # span query therefore returned nothing on every run, `build_decision_record`
+                # reported MISSING_SPANS=[AGENT_RUN, TOOL_CALL, DECISION], and
+                # `WriteDecisionRecord` fail-closed every decision to a human. The fail-closed
+                # behaviour was correct; there was simply nothing it could ever succeed on.
+                # "aws/spans" FIRST: that is the unified traces destination that
+                # UNIFIED_TRACES_DESTINATION_ENABLED=true actually writes OTEL spans to, verified
+                # live (real 32-hex traceIds, JSON one span per line). The per-agent groups named
+                # by design §9.3 follow it, because they carry only `[runtime-logs]` stdout streams
+                # in practice — both are queried so the evidence is found wherever it really lands.
+                "SPAN_LOG_GROUP": ",".join(
+                    ["aws/spans"] + [v for _, v in sorted(trace_log_group_names.items())]),
                 "HARNESS_ENDPOINT_NAME": "live",
                 # R18.6 — the endpoint that actually served each agent, so a decision stays
                 # explainable after an endpoint is repointed at a new harness version.
@@ -136,8 +152,20 @@ class OrchestrationStack(Stack):
         self.audit_writer.add_to_role_policy(iam.PolicyStatement(
             sid="ReadSpans",
             actions=["logs:FilterLogEvents"],
-            resources=[f"arn:aws:logs:{self.region}:{self.account}:log-group:"
-                       f"/aws/bedrock-agentcore/{PROJECT}*"],
+            # Scoped to the AgentCore runtime trace groups. The previous resource pattern
+            # ("/aws/bedrock-agentcore/kyc90*") could not match the real group names
+            # ("/aws/bedrock-agentcore/runtimes/harness_kyc90_<agent>-<id>-live"), so even once
+            # the group name was corrected this grant would still have denied the read.
+            resources=[
+                # the unified traces destination, where the spans actually are
+                f"arn:aws:logs:{self.region}:{self.account}:log-group:aws/spans:*",
+                f"arn:aws:logs:{self.region}:{self.account}:log-group:aws/spans",
+                # the per-agent runtime groups named by design §9.3. The previous pattern
+                # ("/aws/bedrock-agentcore/kyc90*") could not match the real names
+                # ("/aws/bedrock-agentcore/runtimes/harness_kyc90_<agent>-<id>-live").
+                f"arn:aws:logs:{self.region}:{self.account}:log-group:"
+                f"/aws/bedrock-agentcore/runtimes/harness_{PROJECT}_*",
+            ],
         ))
         case_key.grant_decrypt(self.audit_writer)
         audit_key.grant_encrypt(self.audit_writer)
@@ -165,6 +193,55 @@ class OrchestrationStack(Stack):
             actions=["states:SendTaskSuccess", "states:SendTaskFailure"],
             resources=["*"],  # task tokens are opaque; they carry no ARN to scope to
         ))
+
+        # ------------------------------------------------- review task token materializer
+        # The token a reviewer submits with arrives in the review SQS message body. The console
+        # used to discover it by calling `ReceiveMessage` on every `GET /review/queue`, which
+        # cannot work: a receive spends the message's finite redrive budget (`maxReceiveCount: 5`,
+        # so the sixth *view* of a case sent a LIVE token to the DLQ — observed twice against this
+        # stack), received messages are invisible to every other reader for the visibility
+        # timeout, and short polling reported an empty queue while five tokens sat on it.
+        #
+        # So the queue is consumed exactly once, here, and the token is written where a lookup
+        # belongs. `GET /review/queue` then reads it from the case record: no visibility, no
+        # redrive budget, no exclusivity, and safe to poll as often as the console likes.
+        #
+        # Deleting the message is safe because the workflow waits on the *token*, not the message
+        # (`ManualReview` is `sqs:sendMessage.waitForTaskToken`), and the token stays valid for its
+        # full 7-day timeout wherever it is stored.
+        self.review_token_materializer = self._python_lambda(
+            "ReviewTokenMaterializer",
+            name=f"{PROJECT}-review-token",
+            source=REPO_ROOT / "review",
+            handler="token_materializer.lambda_handler",
+            description=(
+                "Consumes each review handoff once and writes its task token onto the case "
+                "record, so listing the queue is a side-effect-free DynamoDB read."
+            ),
+            memory_mb=256,
+            timeout=Duration.seconds(30),
+            environment={"CASE_TABLE_NAME": case_table_name},
+        )
+        self.review_token_materializer.add_to_role_policy(iam.PolicyStatement(
+            sid="MaterialiseReviewTaskToken",
+            actions=["dynamodb:UpdateItem"],
+            resources=[case_table_arn],
+        ))
+        case_key.grant_decrypt(self.review_token_materializer)
+        # `grant_consume_messages`, not a bare action list: it also grants the KMS decrypt this
+        # encrypted queue needs. Granting only the SQS actions leaves the consumer unable to read
+        # and the failure surfaces as an empty batch rather than an error.
+        self.review_queue.grant_consume_messages(self.review_token_materializer)
+        self.review_token_materializer.add_event_source(
+            lambda_sources.SqsEventSource(
+                self.review_queue,
+                batch_size=10,
+                # Partial batch failures: one message whose write fails must not redeliver the
+                # nine that succeeded, because every redelivery spends redrive budget on a live
+                # token.
+                report_batch_item_failures=True,
+            )
+        )
         self.review_handler.add_to_role_policy(iam.PolicyStatement(
             sid="PublishQueueMetrics",
             actions=["cloudwatch:PutMetricData"],

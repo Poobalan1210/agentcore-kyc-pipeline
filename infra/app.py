@@ -23,6 +23,7 @@ from kyc.foundation_stack import FoundationStack
 from kyc.gateways_stack import GatewaysStack
 from kyc.harnesses_stack import HarnessesStack
 from kyc.ingress_stack import IngressStack
+from kyc.lifecycle_stack import LifecycleStack
 from kyc.orchestration_stack import OrchestrationStack
 from kyc.policies_stack import PoliciesStack
 from kyc.tools_stack import ToolsStack
@@ -111,6 +112,7 @@ orchestration = OrchestrationStack(
     sfn_role_arn=foundation.sfn_role.role_arn,
     harness_arns=harnesses.harness_arns,
     harness_endpoint_arns=harnesses.endpoint_arns,
+    trace_log_group_names=harnesses.trace_log_group_names,
     model_ids=harnesses.model_ids,
     description=(
         "Phase 1 and Phase 2 state machines (JSONata, F-71), the pure decision engine, the "
@@ -130,6 +132,32 @@ ingress = IngressStack(
     ),
 )
 ingress.add_dependency(orchestration)
+
+# Phase 3 — the day-12 lifecycle loop (G-01). Deliberately a separate stack from orchestration:
+# the append-only decision history needs its own IAM boundary (PutItem and nothing else), and
+# bundling it with the mutable case-table grants would make that boundary a comment rather than a
+# control. Depends on orchestration for the engine/audit/review ARNs and on harnesses for the
+# fraud harness it re-invokes.
+lifecycle = LifecycleStack(
+    app, "KycLifecycle",
+    env=env,
+    case_table_name=foundation.case_table.table_name,
+    case_table_arn=foundation.case_table.table_arn,
+    case_key_arn=foundation.case_key.key_arn,
+    decision_engine_arn=orchestration.decision_engine.function_arn,
+    audit_writer_arn=orchestration.audit_writer.function_arn,
+    review_queue_url=orchestration.review_queue.queue_url,
+    review_queue_arn=orchestration.review_queue.queue_arn,
+    # The re-screen runs the Fraud agent off the critical path, so it can afford a stronger model
+    # and high reasoning effort — the latency that rules it out of Phase 1 is free here.
+    fraud_harness_arn=harnesses.harness_arns["fraud"],
+    fraud_model_id=harnesses.model_ids["fraud"],
+    description=(
+        "Phase 3 lifecycle re-assessment: EventBridge bus + archive, Standard state machine, "
+        "append-only decision history (G-01)."
+    ),
+)
+lifecycle.add_dependency(orchestration)
 
 # Independent of the Phase 1-7 backend chain — task 14.1 notes this phase builds in parallel,
 # depending only on Phase 1 foundation. No stack dependency to the orchestration chain: Cognito

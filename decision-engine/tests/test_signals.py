@@ -435,3 +435,179 @@ class TestStructuredFindingsAreAuthoritative:
         from decision_handler import InputError
         with _pytest.raises(InputError, match="findings"):
             lambda_handler(self.base(findings=["documents"]))
+
+
+class TestVelocityCriticalFromTheAgentsOwnVocabulary:
+    """The fraud agent's prose uses per-signal `*Critical` flags, not the contract's one field.
+
+    `submit_fraud_assessment` asks for a single `velocityCritical` boolean. When the agent answers in
+    prose instead of calling it, it reports its own richer shape. Measured live on a clean case::
+
+        {"deviceAndIpApplicationCounts": {"deviceApplicationCritical": false,
+                                          "ipApplicationCritical": false, ...},
+         "thinFile": false, "syntheticIdentitySignals": []}
+
+    Nothing is named `velocityCritical`, so the signal resolved to None, fraud was reported
+    UNAVAILABLE, and a case with a complete clean fraud answer fail-closed to a human. That is what
+    made the 90-second auto-approve path non-deterministic — it depended on whether the model chose
+    to call its tool on that particular run.
+    """
+
+    @staticmethod
+    def _fraud(payload):
+        import json
+        return {"Content": [{"Text": "<thinking>done</thinking>\n\n" + json.dumps(payload)}]}
+
+    REAL_CLEAN = {
+        "deviceAndIpApplicationCounts": {
+            "deviceApplicationCount": 0, "ipApplicationCount": 0,
+            "deviceApplicationElevated": False, "deviceApplicationCritical": False,
+            "ipApplicationElevated": False, "ipApplicationCritical": False,
+        },
+        "geographicInconsistency": {
+            "documentCountry": "US", "addressCountry": "US",
+            "ipCountry": "UNAVAILABLE", "countriesDiffer": False,
+        },
+        "thinFile": False, "syntheticIdentitySignals": [],
+    }
+
+    def test_the_real_clean_payload_resolves_to_not_critical(self):
+        from signals import velocity_critical
+        assert velocity_critical(self._fraud(self.REAL_CLEAN)) is False
+
+    def test_any_single_breach_is_critical(self):
+        from signals import velocity_critical
+        payload = {"deviceAndIpApplicationCounts": {
+            "deviceApplicationCritical": True, "ipApplicationCritical": False}}
+        assert velocity_critical(self._fraud(payload)) is True
+
+    def test_elevated_alone_is_not_critical_and_not_a_guess(self):
+        """Elevated is a warning, not a breach. Inventing one would be worse than UNAVAILABLE."""
+        from signals import velocity_critical
+        payload = {"deviceApplicationElevated": True, "ipApplicationElevated": True}
+        assert velocity_critical(self._fraud(payload)) is None
+
+    def test_the_contract_field_still_wins_when_present(self):
+        from signals import velocity_critical
+        payload = {"velocityCritical": True,
+                   "deviceAndIpApplicationCounts": {"deviceApplicationCritical": False}}
+        assert velocity_critical(self._fraud(payload)) is True
+
+    def test_no_signal_at_all_stays_undetermined(self):
+        """Fail-closed is preserved: absence of information must never read as a clean pass."""
+        from signals import velocity_critical
+        assert velocity_critical({"Content": [{"Text": "I could not reach the tool."}]}) is None
+
+    def test_derive_reports_fraud_as_determined_on_the_real_payload(self):
+        """The end-to-end consequence: fraud must no longer land in `undetermined`."""
+        from signals import derive
+        signals, undetermined = derive({"fraud": self._fraud(self.REAL_CLEAN)})
+        assert "fraud" not in undetermined
+        assert signals["velocitySignals"] == {"critical": False}
+
+
+class TestFraudFieldNamesVaryBetweenRuns:
+    """The fraud agent paraphrases its own field names, so the fallback must match the token.
+
+    Two real payloads captured hours apart for the SAME clean case, both with all signals false::
+
+        {"deviceAndIpApplicationCounts": {"deviceApplicationCritical": false,
+                                          "ipApplicationCritical": false}}
+        {"deviceAndIpApplicationCounts": {"signals": {"criticalDeviceReuse": false,
+                                                      "criticalIpReuse": false,
+                                                      "elevatedIpReuse": false}}}
+
+    A suffix-only match read the second as "no information" and fail-closed a clean applicant to a
+    human — the auto-approve path went from working to broken with no code change between runs.
+    """
+
+    @staticmethod
+    def _fraud(payload):
+        import json
+        return {"Content": [{"Text": "<thinking>done</thinking>\n\n" + json.dumps(payload)}]}
+
+    SUFFIX_SHAPE = {"deviceAndIpApplicationCounts": {
+        "deviceApplicationCount": 0, "deviceApplicationCritical": False,
+        "ipApplicationElevated": False, "ipApplicationCritical": False}}
+
+    PREFIX_SHAPE = {"deviceAndIpApplicationCounts": {
+        "deviceApplications": 0, "ipApplications": 0,
+        "signals": {"criticalDeviceReuse": False, "elevatedIpReuse": False,
+                    "criticalIpReuse": False}},
+        "geographicInconsistency": {"documentCountry": "US", "addressCountry": "US",
+                                    "ipCountry": "UNAVAILABLE", "inconsistency": False},
+        "thinFile": False, "syntheticIdentitySignals": {"sharedAttributes": []}}
+
+    def test_suffix_shape_resolves(self):
+        from signals import velocity_critical
+        assert velocity_critical(self._fraud(self.SUFFIX_SHAPE)) is False
+
+    def test_prefix_shape_resolves(self):
+        from signals import velocity_critical
+        assert velocity_critical(self._fraud(self.PREFIX_SHAPE)) is False
+
+    def test_prefix_shape_detects_a_breach(self):
+        from signals import velocity_critical
+        payload = {"signals": {"criticalDeviceReuse": True, "criticalIpReuse": False}}
+        assert velocity_critical(self._fraud(payload)) is True
+
+    def test_elevated_only_still_yields_no_answer(self):
+        """Both namings of the warning-level signal must stay undetermined, never a clean pass."""
+        from signals import velocity_critical
+        assert velocity_critical(self._fraud({"elevatedIpReuse": True})) is None
+        assert velocity_critical(self._fraud({"ipApplicationElevated": True})) is None
+
+    def test_both_shapes_make_fraud_determined(self):
+        from signals import derive
+        for shape in (self.SUFFIX_SHAPE, self.PREFIX_SHAPE):
+            _, undetermined = derive({"fraud": self._fraud(shape)})
+            assert "fraud" not in undetermined
+
+
+class TestToolResultsNestedAsPythonRepr:
+    """Agents nest a tool's return value as its Python repr, not as JSON.
+
+    Measured live on the prescreen agent::
+
+        {"tool": "SanctionsExact___sanctions_exact_match",
+         "result": "{'status':'OK','data':{'matched':false,'hitCount':0,...}}"}
+
+    `matched` is inside a STRING, so the JSON walker never reached it, `pre_screen_matched` returned
+    None, and a clean sanctions result was reported UNAVAILABLE — fail-closing a clean applicant to
+    a human review. Note the payload is neither valid JSON (single quotes) nor valid Python
+    (`false`), which is why it is normalised textually rather than with `ast.literal_eval`.
+    """
+
+    @staticmethod
+    def _wrap(payload):
+        import json
+        return {"Content": [{"Text": "<thinking>done</thinking>\n\n" + json.dumps(payload)}]}
+
+    CLEAN = {"tool": "SanctionsExact___sanctions_exact_match",
+             "result": ("{'status':'OK','tool':'sanctions_exact_match','data':{'matched':false,"
+                        "'hitCount':0,'hits':[],'syntheticData':true},'source':'synthetic'}")}
+
+    def test_clean_nested_result_resolves_to_no_match(self):
+        from signals import pre_screen_matched
+        assert pre_screen_matched(self._wrap(self.CLEAN)) is False
+
+    def test_nested_hit_resolves_to_matched(self):
+        from signals import pre_screen_matched
+        assert pre_screen_matched(
+            self._wrap({"result": "{'data':{'matched':true,'hitCount':2}}"})) is True
+
+    def test_unparseable_nesting_stays_undetermined(self):
+        """A payload we cannot read must never become a fabricated clean pass."""
+        from signals import pre_screen_matched
+        assert pre_screen_matched(self._wrap({"result": "{not parseable at all"})) is None
+
+    def test_prescreen_is_determined_end_to_end(self):
+        from signals import derive
+        _, undetermined = derive({"prescreen": self._wrap(self.CLEAN)})
+        assert "prescreen" not in undetermined
+
+    def test_embedded_json_surfaces_the_nested_object(self):
+        from signals import embedded_json
+        import json
+        objs = embedded_json(json.dumps(self.CLEAN))
+        assert any("data" in o or "matched" in o for o in objs), objs

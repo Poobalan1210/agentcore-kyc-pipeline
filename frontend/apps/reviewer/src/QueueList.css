@@ -52,3 +52,11 @@
   margin: 0;
   color: var(--color-warning);
 }
+
+/* Orphaned: the review window has expired, so no decision can be submitted. Deliberately a
+   stronger tone than the transient --no-token hint — the two states need to look different or a
+   reviewer reads "expired" as "wait a moment" and keeps waiting. */
+.kyc-queue-list__orphaned {
+  color: #b3261e;
+  font-weight: 500;
+}

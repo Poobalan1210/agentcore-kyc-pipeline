@@ -21,6 +21,9 @@ from typing import Any
 from edge_cases import EdgeFacts, evaluate_edge_cases
 from models import (
     FullInputs,
+    LifecycleDecision,
+    RiskEvent,
+    RiskEventSeverity,
     MatchStrength,
     PepStatus,
     PreliminaryInputs,
@@ -30,6 +33,7 @@ from models import (
     VelocitySignals,
 )
 from outcomes import select_phase1_outcome, select_phase2_outcome
+from lifecycle import Day0Snapshot, history_sort_key, idempotency_name, reassess
 from signals import derive as derive_signals
 from signals import from_findings as signals_from_findings
 from identity_match import evaluate as evaluate_identity
@@ -45,8 +49,8 @@ class InputError(ValueError):
 def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any]:
     """Route on `phase`. Returns the decision plus everything R4.9 / R18.6 need for the audit."""
     phase = event.get("phase")
-    if phase not in (1, 2, "1", "2"):
-        raise InputError(f"phase must be 1 or 2, got {phase!r}")
+    if phase not in (1, 2, 3, "1", "2", "3"):
+        raise InputError(f"phase must be 1, 2 or 3, got {phase!r}")
 
     agent_results = event.get("agentResults") or {}
     if not isinstance(agent_results, dict):
@@ -120,6 +124,14 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
         event.setdefault("pepStatus", "NONE")
         event.setdefault("adverseMediaSeverity", "NONE")
 
+    if str(phase) == "3":
+        # Lifecycle re-assessment (G-01). Returns early because it shares nothing with the
+        # onboarding phases beyond the tier calculation: there is no Phase-1 outcome table to
+        # consult, no edge-case list to apply, and — critically — nothing to update. The result is
+        # a new decision version to be APPENDED, so folding it into the fall-through below would
+        # invite exactly the mutation this flow exists to avoid.
+        return _phase3(event, decided_at=str(event.get("decidedAt") or ""))
+
     if str(phase) == "1":
         tier = preliminary_tier(_preliminary_from(event))
         decision = select_phase1_outcome(
@@ -150,6 +162,80 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
         # comparison ran and matched, not only when it failed — "no finding" and "not checked" are
         # different facts, and only the audit record can tell them apart later (R18.2).
         "identityMatch": identity_comparison.to_dict(),
+    }
+
+
+def _phase3(event: dict[str, Any], *, decided_at: str) -> dict[str, Any]:
+    """Re-assess an approved customer against a risk event, and return a row to APPEND.
+
+    The response deliberately carries `historySortKey` and `idempotencyName` rather than leaving
+    the caller to compose them. Both are correctness-critical — the sort key is what keeps the
+    history append-only and ordered, and the execution name is what makes a replayed event collapse
+    onto the original run — so deriving them here keeps them in tested code instead of in a
+    JSONata expression in the state machine, which is where the equivalent logic was lost before
+    (see `signals.py` on why prose in the ASL was the wrong place for a decision).
+    """
+    raw_event = event.get("riskEvent") or {}
+    if not isinstance(raw_event, dict):
+        raise InputError("riskEvent must be an object")
+    for required in ("eventId", "eventType", "severity", "customerId", "occurredAt"):
+        if not raw_event.get(required):
+            raise InputError(f"riskEvent.{required} is required")
+    try:
+        severity = RiskEventSeverity(str(raw_event["severity"]).upper())
+    except ValueError as exc:
+        raise InputError(f"unknown riskEvent.severity {raw_event['severity']!r}") from exc
+
+    risk_event = RiskEvent(
+        event_id=str(raw_event["eventId"]),
+        event_type=str(raw_event["eventType"]),
+        severity=severity,
+        customer_id=str(raw_event["customerId"]),
+        occurred_at=str(raw_event["occurredAt"]),
+        detail=dict(raw_event.get("detail") or {}),
+    )
+
+    raw_day0 = event.get("day0") or {}
+    if not isinstance(raw_day0, dict) or not raw_day0.get("caseId"):
+        raise InputError("day0.caseId is required to re-assess an existing decision")
+    try:
+        day0_tier = RiskTier(str(raw_day0.get("tier", "")).upper())
+    except ValueError as exc:
+        raise InputError(f"unknown day0.tier {raw_day0.get('tier')!r}") from exc
+
+    day0 = Day0Snapshot(
+        case_id=str(raw_day0["caseId"]),
+        tier=day0_tier,
+        outcome=str(raw_day0.get("outcome", "")),
+        decided_at=str(raw_day0.get("decidedAt", "")),
+        version=int(raw_day0.get("version", 1)),
+    )
+
+    # No fresh evidence means the re-screen did not complete. Passing None is the honest signal;
+    # `reassess` turns it into SYSTEM_ERROR and a human, never "risk unchanged".
+    new_evidence = _full_from(event) if event.get("evidenceComplete") else None
+
+    decision: LifecycleDecision = reassess(
+        day0=day0, event=risk_event, new_evidence=new_evidence, decided_at=decided_at)
+
+    return {
+        "phase": 3,
+        "outcome": decision.outcome.value,
+        "day0Tier": decision.day0_tier.value,
+        "newTier": decision.new_tier.value,
+        "riskChanged": decision.day0_tier is not decision.new_tier,
+        "version": decision.version,
+        "decidedAt": decision.decided_at,
+        "eventId": decision.event_id,
+        "nextReviewDays": decision.next_review_days,
+        "explanation": decision.rationale,
+        # Composed here so the state machine cannot get them subtly wrong.
+        "historySortKey": history_sort_key(decision.decided_at, decision.version),
+        "idempotencyName": idempotency_name(risk_event.customer_id, risk_event.event_id),
+        # The day-zero decision is echoed unchanged as a standing assertion that this flow read it
+        # and did not edit it.
+        "day0Preserved": {"caseId": day0.case_id, "outcome": day0.outcome,
+                          "decidedAt": day0.decided_at, "tier": day0.tier.value},
     }
 
 

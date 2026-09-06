@@ -143,7 +143,20 @@ export function KycFlow({ onRestart }: { onRestart: () => void }) {
   }
 
   if (step === "result" && result) {
-    return <ResultStep status={result} onRestart={onRestart} />;
+    return (
+      <ResultStep
+        status={result}
+        onRestart={onRestart}
+        // Back to the liveness step with the same application: same applicationId, same declared
+        // identity, same document. A step-up asks for one thing, so the applicant is sent to do
+        // that one thing instead of starting again from the jurisdiction picker.
+        onRetryLiveness={() => {
+          setResult(null);
+          setSubmitError(null);
+          setStep("liveness");
+        }}
+      />
+    );
   }
 
   return (

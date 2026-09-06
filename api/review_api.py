@@ -54,14 +54,20 @@ def list_queue(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]
     )
     items = resp.get("Items", [])
     cases = [_project_queued_case(item) for item in items]
+    items_by_applicant = {
+        _s(item.get("applicantId")): item for item in items if item.get("applicantId")
+    }
 
-    queue_url = os.environ.get("REVIEW_QUEUE_URL")
-    if queue_url and cases:
-        tokens_by_applicant = _peek_task_tokens(boto3.client("sqs"), queue_url)
-        for case in cases:
-            token = tokens_by_applicant.get(case["applicantId"])
-            if token:
-                case["taskToken"] = token
+    # The token comes from the case record, written once by `review/token_materializer.py` when
+    # the review message was handed off. It used to be discovered by calling `ReceiveMessage` here
+    # on every request, which cannot work: each read spends the message's finite redrive budget
+    # (maxReceiveCount=5, so the sixth *view* of a case sent a live token to the DLQ), reads are
+    # mutually exclusive for the visibility timeout, and short polling reported an empty queue
+    # while five tokens sat on it. A DynamoDB read has none of those properties.
+    for case in cases:
+        token = _s(items_by_applicant.get(case["applicantId"], {}).get("reviewTaskToken"))
+        if token:
+            case["taskToken"] = token
 
     return _response(200, {"depth": len(cases), "cases": cases})
 
@@ -77,6 +83,11 @@ _PEEK_ROUNDS = 6
 #: peek does not hide a case from a second reviewer for long.
 _PEEK_VISIBILITY_SECONDS = 30
 
+#: Long-poll wait per round. Any value > 0 switches SQS from short to long polling, which is what
+#: makes an empty response mean "nothing there" instead of "you happened to ask the wrong servers".
+#: Kept small so six rounds cannot dominate the console's request latency.
+_PEEK_WAIT_SECONDS = 2
+
 
 def _peek_task_tokens(sqs, queue_url: str) -> dict[str, str]:
     """Map applicantId -> taskToken by reading the review queue **without deleting** anything.
@@ -85,19 +96,52 @@ def _peek_task_tokens(sqs, queue_url: str) -> dict[str, str]:
     reviewable if nobody acts, and so the Step Functions task token stays live. Deleting here would
     silently discard a pending review.
 
+    **Visibility is released before returning.** The receive needs a non-zero timeout so that the
+    `_PEEK_ROUNDS` loop paginates instead of re-reading the same ten messages, but leaving that
+    timeout in force after the request is what made the console starve itself: every
+    `GET /review/queue` hid every message for the timeout's duration, so the queue's own automatic
+    refresh — and any second reviewer — got an empty token map and rendered actionable cases as
+    "Task token not yet visible". Measured live: three queue loads in thirteen seconds, tokens on
+    the first and none on the next two, with five live tokens sitting on the queue the whole time.
+
+    Releasing is safe because a decision does not need the message. `submit_decision` resumes the
+    workflow with `SendTaskSuccess` using the token string the client already holds, so the token
+    outlives visibility entirely; concurrent reviewers are settled by the first-writer-wins check
+    in `handle_review` (R6.5/R21.4), not by hiding messages from each other.
+
     Best-effort by nature. A message held invisible by another reviewer's concurrent poll simply
     has no token in this response; the case still appears in the queue from the DynamoDB side,
     without an actionable token until it resurfaces.
     """
     tokens: dict[str, str] = {}
+    handles: list[str] = []
     for _ in range(_PEEK_ROUNDS):
         resp = sqs.receive_message(
             QueueUrl=queue_url, MaxNumberOfMessages=10,
-            VisibilityTimeout=_PEEK_VISIBILITY_SECONDS, WaitTimeSeconds=0)
+            VisibilityTimeout=_PEEK_VISIBILITY_SECONDS,
+            # LONG polling, not short. `WaitTimeSeconds=0` samples only a subset of the SQS
+            # servers holding the queue, so on a small queue it returns an empty response most of
+            # the time *even though messages are sitting there* — and the loop below treats the
+            # first empty response as "queue drained" and stops.
+            #
+            # That combination is what made the reviewer console unusable: the queue listed every
+            # case from DynamoDB but attached a token to none of them, so all of them rendered as
+            # "Task token not yet visible" and no decision could be submitted from the console at
+            # all. Reproduced deterministically — calling this function against a queue with five
+            # visible messages returned 0 tokens, while a long-polling receive against the same
+            # queue at the same moment returned them.
+            #
+            # A short-poll empty response is not evidence of an empty queue. Long polling queries
+            # all servers and returns as soon as anything is available, which is the only way the
+            # `break` below is a sound "nothing left" signal.
+            WaitTimeSeconds=_PEEK_WAIT_SECONDS)
         messages = resp.get("Messages", [])
         if not messages:
             break
         for message in messages:
+            handle = message.get("ReceiptHandle")
+            if handle:
+                handles.append(handle)
             try:
                 body = json.loads(message["Body"])
             except json.JSONDecodeError:
@@ -106,6 +150,24 @@ def _peek_task_tokens(sqs, queue_url: str) -> dict[str, str]:
             task_token = body.get("taskToken")
             if applicant_id and task_token:
                 tokens[applicant_id] = task_token
+
+    # DELIBERATELY NOT released back to visibility 0.
+    #
+    # Releasing looks right — a peek should not hide what it read — and it is actively dangerous
+    # here, because reading a token costs a *redrive budget*, not just visibility. Every
+    # `ReceiveMessage` increments the message's ApproximateReceiveCount, and this queue carries
+    # `maxReceiveCount: 5`, so the sixth read of a case moves a LIVE Step Functions task token to
+    # the dead-letter queue. The 30-second visibility timeout is therefore the only thing rate
+    # limiting that budget to one receive per 30s per case.
+    #
+    # Proven the hard way: releasing to 0 removed that throttle, and roughly five console polls
+    # redrove all five waiting cases to `kyc90-review-dlq` — the executions stayed alive, but the
+    # cases vanished from the reviewer's queue.
+    #
+    # The real fix is not a timeout value at all: it is to stop discovering tokens by receiving
+    # from SQS. The token belongs on the case record, where reading it has no side effects. Until
+    # that lands, this stays as-is and the throttle is load-bearing. See TODO(review-token-source).
+    del handles
     return tokens
 
 

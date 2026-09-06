@@ -45,7 +45,20 @@ const OUTCOME_COPY: Record<
  * — `requiredItem` (STEP_UP) and `reasonCode` are shown verbatim rather than paraphrased,
  * because a paraphrase risks drifting from what the decision engine actually determined.
  */
-export function ResultStep({ status, onRestart }: { status: CaseStatusResponse; onRestart: () => void }) {
+export function ResultStep({
+  status,
+  onRestart,
+  onRetryLiveness,
+}: {
+  status: CaseStatusResponse;
+  onRestart: () => void;
+  /**
+   * Repeat just the liveness check, keeping the rest of the application. Optional so a caller that
+   * genuinely cannot resume — a spent single-use session, say — simply does not offer it, rather
+   * than offering a button that fails.
+   */
+  onRetryLiveness?: () => void;
+}) {
   const copy = status.outcome ? OUTCOME_COPY[status.outcome] : undefined;
 
   return (
@@ -76,6 +89,22 @@ export function ResultStep({ status, onRestart }: { status: CaseStatusResponse; 
           <p className="kyc-hint">
             <strong>Reason:</strong> {status.reasonCode}
           </p>
+        ) : null}
+
+        {/*
+          A step-up asks for ONE thing, so offer that one thing.
+
+          This screen used to present "Start a new application" as the only action, including on
+          STEP_UP — so an applicant told "a repeated liveness check is needed" had no way to repeat
+          the liveness check. The single button available discarded the jurisdiction, the declared
+          identity and the uploaded document to redo a ten-second camera step. Observed live: a
+          failed liveness left a real applicant with a correct diagnosis and no path forward.
+
+          The retry is offered first and styled as the primary action, because it is what the
+          screen is asking for; starting over stays available but is no longer the only exit.
+        */}
+        {onRetryLiveness && status.outcome === "STEP_UP" ? (
+          <Button onClick={onRetryLiveness}>Redo the liveness check</Button>
         ) : null}
 
         <Button variant="secondary" onClick={onRestart}>

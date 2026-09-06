@@ -285,9 +285,16 @@ class TestIdempotency:
 
     def test_phase2_start_is_named_for_idempotency(self, p1):
         """R21.7 — a duplicate StartExecution with the same name is rejected by Step Functions,
-        so screening cannot run twice for one provisional decision."""
+        so screening cannot run twice for one provisional decision.
+
+        The name is the decision id alone. It was `applicantId & '-' & decisionId`, which exceeded
+        the service's 80-character limit for every real Cognito-derived applicant id (76 chars) and
+        left the execution at `Phase2NotStarted`. The decision id is a uuid4 minted per decision, so
+        it is already globally unique and the applicant id added nothing but length.
+        """
         args = p1["States"]["TriggerPhase2"]["Arguments"]
-        assert "$applicantId" in args["Name"] and "decisionId" in args["Name"]
+        assert "$provisionalDecisionId" in args["Name"]
+        assert "$applicantId" not in args["Name"]
 
 
 class TestPhase2IsNotAwaited:

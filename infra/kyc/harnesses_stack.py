@@ -141,6 +141,11 @@ class HarnessesStack(Stack):
         self.harnesses: dict[str, cdk.CfnResource] = {}
         self.endpoints: dict[str, cdk.CfnResource] = {}
         self.trace_log_group_arns: dict[str, str] = {}
+        # The log group NAMES, not just the ARNs. The audit writer calls
+        # `logs:FilterLogEvents`, whose `logGroupName` parameter takes a name — and the group it
+        # was pointed at (`/aws/bedrock-agentcore/kyc90`) never existed, so every reasoning span
+        # query came back empty and every decision record was refused as incomplete.
+        self.trace_log_group_names: dict[str, str] = {}
 
         #: What the orchestration stack invokes. **Plain harness ARNs** (F-85): the Step Functions
         #: invokeHarness integration rejects an endpoint-suffixed ARN with "Invalid harness ARN
@@ -372,6 +377,7 @@ class HarnessesStack(Stack):
             self.trace_log_group_arns[agent.key] = cdk.Fn.join(
                 "", [f"arn:aws:logs:{self.region}:{self.account}:log-group:",
                      trace_log_group_name])
+            self.trace_log_group_names[agent.key] = trace_log_group_name
 
             # Task 5.4: a named endpoint pinned to a version, so a bad prompt can be rolled
             # back mid-demo without a redeploy. R18.6 requires the endpoint name on the
