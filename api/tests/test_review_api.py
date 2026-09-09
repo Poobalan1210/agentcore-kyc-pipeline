@@ -621,66 +621,9 @@ class TestGetAudit:
         assert resp["statusCode"] == 400
 
 
-class TestPeekDoesNotBurnRedriveBudget:
-    """A queue peek must not spend the message's redrive budget or delete a pending review.
-
-    Reading a token uses `ReceiveMessage`, which increments ApproximateReceiveCount, and the review
-    queue carries `maxReceiveCount: 5`. So "peeking" is not free: the sixth read of a case moves a
-    LIVE Step Functions task token to the DLQ. Proven live — releasing visibility to 0 removed the
-    incidental rate limit and about five console polls redrove all five waiting cases to
-    kyc90-review-dlq while their executions stayed alive.
-
-    These tests pin the two properties that keep a live token where a reviewer can reach it.
-    """
-
-    class _FakeSqs:
-        def __init__(self, batches):
-            self.batches = list(batches)
-            self.released = []
-            self.deleted = []
-            self.receives = 0
-
-        def receive_message(self, **kw):
-            self.receives += 1
-            if not self.batches:
-                return {}
-            return {"Messages": self.batches.pop(0)}
-
-        def change_message_visibility(self, *, QueueUrl, ReceiptHandle, VisibilityTimeout):
-            self.released.append((ReceiptHandle, VisibilityTimeout))
-
-        def delete_message(self, **kw):
-            self.deleted.append(kw)
-
-    def _msg(self, applicant, handle):
-        import json
-        return {"ReceiptHandle": handle,
-                "Body": json.dumps({"applicantId": applicant, "taskToken": "tok-" + applicant})}
-
-    def test_reads_the_tokens(self):
-        from review_api import _peek_task_tokens
-        sqs = self._FakeSqs([[self._msg("APP-1", "h1"), self._msg("APP-2", "h2")]])
-        assert _peek_task_tokens(sqs, "q") == {"APP-1": "tok-APP-1", "APP-2": "tok-APP-2"}
-
-    def test_does_not_release_visibility(self):
-        """Releasing removes the only throttle on a finite redrive budget (maxReceiveCount=5)."""
-        from review_api import _peek_task_tokens
-        sqs = self._FakeSqs([[self._msg("APP-1", "h1")]])
-        _peek_task_tokens(sqs, "q")
-        assert sqs.released == [], (
-            "must not reset visibility: each receive spends redrive budget, and releasing lets "
-            "console polling redrive live task tokens to the DLQ"
-        )
-
-    def test_never_deletes_a_pending_review(self):
-        from review_api import _peek_task_tokens
-        sqs = self._FakeSqs([[self._msg("APP-1", "h1")]])
-        _peek_task_tokens(sqs, "q")
-        assert sqs.deleted == [], "deleting would discard a live task token"
-
-    def test_stops_receiving_once_the_queue_is_drained(self):
-        """Bounded receives per request:every extra round spends redrive budget for nothing."""
-        from review_api import _peek_task_tokens
-        sqs = self._FakeSqs([[self._msg("APP-1", "h1")]])
-        _peek_task_tokens(sqs, "q")
-        assert sqs.receives == 2, "one round with messages, one empty round to detect the end"
+# TestPeekDoesNotBurnRedriveBudget used to sit here, pinning the SQS-peek helper's behaviour.
+# Both the helper and these tests are gone: the review task token is read from the case record
+# now, so there is no peek to constrain. The guard that matters survives as
+# TestListQueue.test_listing_the_queue_never_reads_from_sqs, which asserts the endpoint itself
+# has no path to ReceiveMessage -- a constraint on observable behaviour rather than on one
+# implementation, so it holds through any future change to how the token is obtained.
