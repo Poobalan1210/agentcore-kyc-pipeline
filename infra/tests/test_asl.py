@@ -473,6 +473,29 @@ class TestHumanReview:
         body = p1["States"]["AwaitReviewDecision"]["Arguments"]["MessageBody"]
         assert body["taskToken"] == "{% $states.context.Task.Token %}"
 
+    def test_each_phase_names_its_own_phase_in_the_handoff(self, p1, p2):
+        """Both definitions enter the SAME `AwaitReviewDecision` state, so the message is the only
+        place the phase can come from.
+
+        Nothing downstream can infer it: a Phase 2 review sits on a case that already has a
+        `phase1` decision written, so the record is ambiguous. With the phase absent from the
+        message, `review_handler.py`'s `body.get("phase") or "phase1"` and the console's
+        `queuedCase.phase ?? "phase1"` both defaulted, and every Phase 2 review was recorded as
+        `phase1Review` -- corrupting audit attribution and pointing the first-writer-wins guard at
+        the wrong decision slot.
+        """
+        assert p1["States"]["AwaitReviewDecision"][
+            "Arguments"]["MessageBody"]["phase"] == "phase1"
+        assert p2["States"]["AwaitReviewDecision"][
+            "Arguments"]["MessageBody"]["phase"] == "phase2"
+
+    def test_the_two_phases_do_not_share_a_phase_label(self, p1, p2):
+        """Mutation guard. Passing the same literal at both call sites would satisfy the test
+        above for one phase and silently reintroduce the bug for the other."""
+        p1_phase = p1["States"]["AwaitReviewDecision"]["Arguments"]["MessageBody"]["phase"]
+        p2_phase = p2["States"]["AwaitReviewDecision"]["Arguments"]["MessageBody"]["phase"]
+        assert p1_phase != p2_phase
+
     def test_an_unresumable_review_is_caught_explicitly(self, p1):
         """The receiver raises this when a case moved on without a decision. Without the Catch
         it would surface as a generic failure and be diagnosed as an infrastructure fault."""
@@ -730,3 +753,48 @@ def _agent_tasks(definition: dict) -> dict[str, dict]:
 
 def _harness_arns(definition: dict) -> set[str]:
     return {s["Arguments"]["HarnessArn"] for s in _agent_tasks(definition).values()}
+
+
+class TestEveryStateChangeIsAudited:
+    """R2.5 as a CLASS invariant, not a per-state assertion.
+
+    `EnrolMonitoring` set `state` to MONITORING and appended nothing, so a completed Phase 2 left
+    the case record reading MONITORING while its `transitions` list still ended at PROVISIONAL.
+    Fixing that one state would leave the next one free to repeat it, so this walks every state in
+    both definitions instead: if an update writes the `state` attribute, it must also append to
+    `transitions` in the same expression.
+
+    Same expression matters. Two separate updates could interleave with a concurrent writer and
+    leave the record and its history disagreeing.
+    """
+
+    def _state_writers(self, definition: dict) -> dict[str, str]:
+        """Every state whose UpdateExpression assigns the `state` attribute."""
+        writers = {}
+        for name, state in definition["States"].items():
+            args = state.get("Arguments") or {}
+            expression = args.get("UpdateExpression")
+            if not isinstance(expression, str):
+                continue
+            names = args.get("ExpressionAttributeNames") or {}
+            aliases = [a for a, real in names.items() if real == "state"]
+            writes_state = any(f"{a} =" in expression for a in aliases)
+            if writes_state or "state =" in expression:
+                writers[name] = expression
+        return writers
+
+    def test_at_least_one_state_writer_exists_in_each_phase(self, p1, p2):
+        """Guard against the walk silently matching nothing and passing vacuously."""
+        assert self._state_writers(p1), "found no state-writing updates in phase 1"
+        assert self._state_writers(p2), "found no state-writing updates in phase 2"
+
+    def test_writing_state_always_appends_a_transition(self, p1, p2):
+        offenders = []
+        for phase_name, definition in (("phase1", p1), ("phase2", p2)):
+            for name, expression in self._state_writers(definition).items():
+                if "transitions = list_append(" not in expression:
+                    offenders.append(f"{phase_name}.{name}")
+        assert not offenders, (
+            "these states change `state` without recording the transition, so the case record "
+            f"and its audit trail can disagree: {offenders}"
+        )

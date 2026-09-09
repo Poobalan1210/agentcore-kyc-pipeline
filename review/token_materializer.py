@@ -40,21 +40,28 @@ import boto3
 _ddb = boto3.client("dynamodb")
 
 
-def _record_token(table: str, applicant_id: str, token: str) -> None:
-    """Write the token onto the case record.
+def _record_token(table: str, applicant_id: str, token: str, phase: str) -> None:
+    """Write the token and the phase it belongs to onto the case record.
 
     Not conditional on absence. A redelivered message carries the same still-valid token, and a
     re-driven review legitimately issues a new one; in both cases the newest token is the one a
     reviewer must use, so last-write-wins is correct here. What must never happen is a *stale*
     token surviving a re-drive, which a `attribute_not_exists` guard would cause.
+
+    `reviewPhase` is written with the token because the two belong together: the token identifies
+    the waiting execution and the phase identifies which decision slot that execution's review must
+    be recorded under. Deriving the phase from the case record later is not possible — a Phase 2
+    review sits on a case that already carries a `phase1` decision.
     """
     _ddb.update_item(
         TableName=table,
         Key={"applicantId": {"S": applicant_id}, "sk": {"S": "CASE"}},
-        UpdateExpression="SET reviewTaskToken = :t, reviewTaskTokenAt = :at",
+        UpdateExpression=(
+            "SET reviewTaskToken = :t, reviewTaskTokenAt = :at, reviewPhase = :p"),
         ExpressionAttributeValues={
             ":t": {"S": token},
             ":at": {"S": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")},
+            ":p": {"S": phase},
         },
     )
 
@@ -79,8 +86,14 @@ def lambda_handler(event: Mapping[str, Any], _context: Any = None) -> dict[str, 
             # A message without a token is not a review handoff. Same reasoning as above.
             continue
 
+        # Default only for messages produced before asl.py carried the phase. A live Phase 2
+        # handoff always sends it, so this fallback never fires for a current execution -- but a
+        # message already on the queue from an older definition must still materialise rather than
+        # be dropped.
+        phase = str(body.get("phase") or "phase1")
+
         try:
-            _record_token(table, str(applicant_id), str(token))
+            _record_token(table, str(applicant_id), str(token), phase)
         except Exception:  # noqa: BLE001 - reported to SQS, never swallowed
             # Report and let SQS redeliver. Swallowing here would delete the message and strand
             # the execution on a token nobody can reach.

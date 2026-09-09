@@ -190,6 +190,46 @@ class TestListQueue:
         resp = review_api.list_queue(dict(REVIEWER_EVENT_CONTEXT))
         assert "taskToken" not in json.loads(resp["body"])["cases"][0]
 
+    def test_projects_the_review_phase_so_a_phase2_review_is_not_filed_as_phase1(
+            self, monkeypatch):
+        """The queue MUST tell the console which phase the review belongs to.
+
+        This projection was missing entirely. `QueuedCaseSummary` declares `phase?: string` and
+        `DecisionForm.tsx` does `phase: queuedCase.phase ?? "phase1"`, so its absence did not fail
+        loudly -- it made EVERY console review record as `phase1Review`, including Phase 2
+        compliance reviews, and `phase2Review` could never be written by any console submission.
+        Worse than the wrong audit label: `existing_review(case, phase)` and
+        `preliminary_tier(case, phase)` then inspect Phase 1's slot, so the first-writer-wins guard
+        for a Phase 2 review checks the wrong decision.
+
+        An optional type plus a `??` default is why 1000 passing tests never noticed.
+        """
+        items = [
+            {"applicantId": {"S": "APP-1"}, "caseId": {"S": "CASE-1"},
+             "jurisdiction": {"S": "us"}, "createdAt": {"S": "2026-08-01T00:00:00Z"},
+             "reviewTaskToken": {"S": "token-abc"}, "reviewPhase": {"S": "phase2"}},
+        ]
+        monkeypatch.setitem(sys.modules, "boto3",
+                            FakeBoto3Module(ddb=FakeDynamo(query_items=items)))
+        monkeypatch.setenv("CASE_TABLE_NAME", "kyc90-cases")
+        resp = review_api.list_queue(dict(REVIEWER_EVENT_CONTEXT))
+        assert json.loads(resp["body"])["cases"][0]["phase"] == "phase2"
+
+    def test_a_case_with_no_recorded_phase_defaults_to_phase1(self, monkeypatch):
+        """Messages queued before `asl.py` carried the phase have no `reviewPhase`.
+
+        Those are Phase 1 handoffs in practice, and defaulting keeps them actionable rather than
+        submitting `phase: null` which `decisions.py` would reject as UNKNOWN_PHASE. The default
+        lives here, once, instead of being re-derived in the console.
+        """
+        items = [{"applicantId": {"S": "APP-1"}, "caseId": {"S": "CASE-1"},
+                  "jurisdiction": {"S": "us"}, "createdAt": {"S": "2026-08-01T00:00:00Z"}}]
+        monkeypatch.setitem(sys.modules, "boto3",
+                            FakeBoto3Module(ddb=FakeDynamo(query_items=items)))
+        monkeypatch.setenv("CASE_TABLE_NAME", "kyc90-cases")
+        resp = review_api.list_queue(dict(REVIEWER_EVENT_CONTEXT))
+        assert json.loads(resp["body"])["cases"][0]["phase"] == "phase1"
+
     def test_listing_the_queue_never_reads_from_sqs(self, monkeypatch):
         """The whole point of moving the token: listing must have no side effect on the message.
 

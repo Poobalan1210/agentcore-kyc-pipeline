@@ -571,10 +571,23 @@ def phase1_definition(
                 # Promoted to first-class attributes so Phase 2 can read the values Phase 1
                 # actually used, rather than re-deriving them from prose a second time and
                 # possibly reaching a different answer for the same applicant (R4.4).
-                "documentConfidence = :dc, velocityCritical = :vc"),
+                "documentConfidence = :dc, velocityCritical = :vc, "
+                # R2.5 — entering PROVISIONAL is a state change and must be recorded. Without
+                # this the audit trail's first entry was `PROVISIONAL -> AWAITING_REVIEW`, so the
+                # account opening itself -- the single most consequential transition in the whole
+                # flow -- had no record of when or why it happened.
+                "transitions = list_append(if_not_exists(transitions, :empty), :tr)"),
             "ExpressionAttributeNames": {"#s": "state"},
             "ExpressionAttributeValues": {
                 ":state": {"S": "PROVISIONAL"},
+                ":empty": {"L": []},
+                ":tr": {"L": [{"M": {
+                    "from": {"S": "{% $case.state.S %}"},
+                    "to": {"S": "PROVISIONAL"},
+                    "at": {"S": "{% $now() %}"},
+                    "actor": {"S": "system"},
+                    "reason": {"S": "{% 'provisional decision: ' & $decision.outcome %}"},
+                }}]},
                 ":d": {"S": "{% $string($decision) %}"},
                 ":dc": {"N": "{% $string($decision.tierInputs.document_confidence) %}"},
                 # "Bool", not "BOOL". Step Functions normalises DynamoDB AttributeValue member
@@ -717,7 +730,8 @@ def phase1_definition(
     states["ManualReview"] = _mark_awaiting_review(
         case_table, next_state="AwaitReviewDecision")
     states["AwaitReviewDecision"] = _review_task(
-        review_queue_url, next_state="PersistOutcome", catch_to="ReviewAbandoned")
+        review_queue_url, next_state="PersistOutcome", catch_to="ReviewAbandoned",
+        phase="phase1")
     states["ReviewAbandoned"] = {
         "Type": "Pass",
         "QueryLanguage": "JSONata",
@@ -912,7 +926,8 @@ def phase2_definition(
     states["ManualReview"] = _mark_awaiting_review(
         case_table, next_state="AwaitReviewDecision")
     states["AwaitReviewDecision"] = _review_task(
-        review_queue_url, next_state="Notify", catch_to="Phase2Failed")
+        review_queue_url, next_state="Notify", catch_to="Phase2Failed",
+        phase="phase2")
 
     notify = AGENT_BY_KEY["notify"]
     states["Notify"] = agent_task(
@@ -938,12 +953,28 @@ def phase2_definition(
         "Arguments": {
             "TableName": case_table,
             "Key": {"applicantId": {"S": "{% $applicantId %}"}, "sk": {"S": "CASE"}},
-            "UpdateExpression": "SET #s = :state, reKycInterval = :i, updatedAt = :t",
+            # R2.5 — the transition append is not optional. This state used to set `state` alone,
+            # so a completed Phase 2 left the case reading MONITORING while the audit trail ended
+            # at PROVISIONAL: a state change with no record of it, in a system whose central claim
+            # is an append-only decision history. Observed on the first Phase 2 execution ever to
+            # reach a terminal state.
+            "UpdateExpression": (
+                "SET #s = :state, reKycInterval = :i, updatedAt = :t, "
+                "transitions = list_append(if_not_exists(transitions, :empty), :tr)"
+            ),
             "ExpressionAttributeNames": {"#s": "state"},
             "ExpressionAttributeValues": {
                 ":state": {"S": "MONITORING"},
                 ":i": {"S": "{% $decision.reKycInterval %}"},
                 ":t": {"S": "{% $now() %}"},
+                ":empty": {"L": []},
+                ":tr": {"L": [{"M": {
+                    "from": {"S": "{% $case.state.S %}"},
+                    "to": {"S": "MONITORING"},
+                    "at": {"S": "{% $now() %}"},
+                    "actor": {"S": "system"},
+                    "reason": {"S": "phase 2 complete; enrolled in ongoing monitoring"},
+                }}]},
             },
         },
         "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 2, "MaxAttempts": 3,
@@ -1191,12 +1222,21 @@ def _mark_awaiting_review(case_table: str, *, next_state: str) -> dict[str, Any]
     }
 
 
-def _review_task(queue_url: str, *, next_state: str, catch_to: str) -> dict[str, Any]:
+def _review_task(
+    queue_url: str, *, next_state: str, catch_to: str, phase: str
+) -> dict[str, Any]:
     """The human wait — a separate state, never an agent call (F-12, design §7.5).
 
     `invokeHarness` has no `waitForTaskToken` variant, so the wait cannot live inside an agent.
     Modelling it as SQS `.waitForTaskToken` also means the queue depth and age are observable,
     which R6.6 needs and an in-agent wait could never provide.
+
+    `phase` is carried in the message body because nothing downstream can infer it. Both
+    `phase1_definition` and `phase2_definition` enter this same state, and the case record alone is
+    ambiguous — a Phase 2 review sits on a case that already has a `phase1` decision written. With
+    the phase absent, `review_handler.py`'s `phase=str(body.get("phase") or "phase1")` and the
+    console's `queuedCase.phase ?? "phase1"` both silently defaulted, so EVERY console review was
+    recorded as `phase1Review` and `existing_review`/`preliminary_tier` inspected the wrong slot.
     """
     return {
         "Type": "Task",
@@ -1208,6 +1248,7 @@ def _review_task(queue_url: str, *, next_state: str, catch_to: str) -> dict[str,
                 "applicantId": "{% $applicantId %}",
                 "caseId": "{% $case.caseId.S %}",
                 "taskToken": "{% $states.context.Task.Token %}",
+                "phase": phase,
             },
         },
         # 7 days is the SQS maximum and the point is that a review does not expire quietly. A

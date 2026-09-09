@@ -540,11 +540,20 @@ def get_audit(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]:
 
 
 def _project_queued_case(item: Mapping[str, Any]) -> dict[str, Any]:
+    """The queue row the console renders and submits against.
+
+    `phase` is projected because the console has no other way to know it. `QueuedCaseSummary`
+    declares it optional and `DecisionForm` does `queuedCase.phase ?? "phase1"`, so omitting it
+    here did not fail loudly -- it silently recorded every review, including Phase 2 compliance
+    reviews, as `phase1Review`, and made `existing_review`/`preliminary_tier` read the wrong slot.
+    Written by `token_materializer.py` from the phase `asl.py` puts in the handoff message.
+    """
     return {
         "applicantId": _s(item.get("applicantId")),
         "caseId": _s(item.get("caseId")),
         "jurisdiction": _s(item.get("jurisdiction")),
         "createdAt": _s(item.get("createdAt")),
+        "phase": _s(item.get("reviewPhase")) or "phase1",
     }
 
 
