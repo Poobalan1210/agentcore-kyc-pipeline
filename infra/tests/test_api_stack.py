@@ -29,6 +29,12 @@ COMMON = dict(
     audit_bucket_name="kyc90-evidence-us",
     audit_key_arn="arn:aws:kms:us-east-1:123456789012:key/us-key",
     phase1_state_machine_arn="arn:aws:states:us-east-1:123456789012:stateMachine:kyc90-phase1",
+    phase2_state_machine_arn="arn:aws:states:us-east-1:123456789012:stateMachine:kyc90-phase2",
+    phase3_state_machine_arn=(
+        "arn:aws:states:us-east-1:123456789012:stateMachine:kyc90-phase3-lifecycle"),
+    account_function_arn="arn:aws:lambda:us-east-1:123456789012:function:kyc90-account-stub",
+    lifecycle_bus_arn="arn:aws:events:us-east-1:123456789012:event-bus/kyc90-lifecycle",
+    lifecycle_bus_name="kyc90-lifecycle",
 )
 
 
@@ -43,19 +49,89 @@ def template() -> Template:
     return Template.from_stack(stack)
 
 
-ALL_ROUTES = {
+CORE_ROUTES = {
     "POST /liveness/session", "GET /liveness/{sessionId}/result",
     "POST /documents/presign", "POST /applicants", "GET /cases/{applicantId}",
     "GET /review/queue", "POST /review/{caseId}/decision", "GET /review/{caseId}/trace",
     "GET /audit/{applicantId}",
+    "GET /accounts/{applicantId}", "GET /accounts/{applicantId}/transactions",
+    "POST /accounts/{applicantId}/transactions",
 }
+DEMO_ROUTES = {"GET /demo/cases", "GET /demo/controls", "PUT /demo/faults",
+               "POST /demo/list-update", "POST /demo/reset"}
+ALL_ROUTES = CORE_ROUTES | DEMO_ROUTES
 
 
-def test_all_nine_routes_exist(template: Template) -> None:
-    """R33.1's minimum plus R34's review/audit routes, plus task 14.9's trace view."""
+def _route_keys(template: Template) -> set[str]:
     routes = template.find_resources("AWS::ApiGatewayV2::Route")
-    keys = {body["Properties"]["RouteKey"] for body in routes.values()}
-    assert keys == ALL_ROUTES
+    return {body["Properties"]["RouteKey"] for body in routes.values()}
+
+
+def test_every_route_exists(template: Template) -> None:
+    """R33.1's minimum, R34's review/audit routes, the trace view, the account routes, and the
+    presenter controls."""
+    assert _route_keys(template) == ALL_ROUTES
+
+
+def test_demo_controls_can_be_left_out_entirely() -> None:
+    """A deployment without presenters has no demo routes and no demo function at all."""
+    app = cdk.App()
+    stack = ApiStack(app, "NoDemo", env=cdk.Environment(account="123456789012",
+                                                        region="us-east-1"),
+                     **{**COMMON, "demo_controls": False})
+    template = Template.from_stack(stack)
+    assert _route_keys(template) == CORE_ROUTES
+    handlers = {b["Properties"]["Handler"]
+                for b in template.find_resources("AWS::Lambda::Function").values()}
+    assert "demo.lambda_handler" not in handlers
+
+
+def _liveness_env(template: Template) -> dict[str, str]:
+    functions = template.find_resources(
+        "AWS::Lambda::Function", {"Properties": {"Handler": "liveness.lambda_handler"}})
+    (function,) = functions.values()
+    return function["Properties"]["Environment"]["Variables"]
+
+
+def test_the_light_challenge_is_the_stacks_default(template: Template) -> None:
+    """D-36 — AWS recommends the light challenge for the highest accuracy; a stack built without
+    a choice asks for it explicitly."""
+    assert _liveness_env(template)["LIVENESS_CHALLENGE"] == "FaceMovementAndLightChallenge"
+
+
+def test_a_demo_can_ask_for_the_movement_challenge() -> None:
+    app = cdk.App()
+    stack = ApiStack(app, "MovementApi", env=cdk.Environment(account="123456789012",
+                                                             region="us-east-1"),
+                     **{**COMMON, "liveness_challenge": "FaceMovementChallenge"})
+    assert _liveness_env(Template.from_stack(stack))["LIVENESS_CHALLENGE"] == (
+        "FaceMovementChallenge")
+
+
+def test_an_unknown_challenge_is_refused_at_synth() -> None:
+    with pytest.raises(ValueError, match="liveness_challenge"):
+        ApiStack(cdk.App(), "BadApi", env=cdk.Environment(account="123456789012",
+                                                          region="us-east-1"),
+                 **{**COMMON, "liveness_challenge": "FaceMovement"})
+
+
+def test_the_api_and_the_stack_agree_on_the_challenge_names() -> None:
+    """`api/liveness.py` cannot import the CDK app, so the pair is held equal here, read from
+    the source rather than imported, so the API module's own imports stay out of this test."""
+    import ast
+    from pathlib import Path
+
+    from kyc.config import LIVENESS_LIGHT_CHALLENGE, LIVENESS_MOVEMENT_CHALLENGE
+
+    source = (Path(__file__).resolve().parents[2] / "api" / "liveness.py").read_text()
+    constants = {
+        node.targets[0].id: node.value.value
+        for node in ast.parse(source).body
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    }
+    assert constants["LIGHT_CHALLENGE"] == LIVENESS_LIGHT_CHALLENGE
+    assert constants["MOVEMENT_CHALLENGE"] == LIVENESS_MOVEMENT_CHALLENGE
 
 
 def test_the_authorizer_is_jwt_backed_by_the_cognito_user_pool(template: Template) -> None:
@@ -96,13 +172,14 @@ def test_review_lambda_asset_bundles_review_handler(template: Template) -> None:
     assert (staged / "metrics.py").exists()
 
 
-def test_three_separate_lambdas_not_one_monolith(template: Template) -> None:
-    """Liveness, applicants, and review need disjoint IAM capability sets — a single function
-    would hold the union, which is a broader blast radius than any one route needs."""
+def test_separate_lambdas_not_one_monolith(template: Template) -> None:
+    """Disjoint IAM capability sets — a single function would hold the union, which is a broader
+    blast radius than any one route needs."""
     fns = template.find_resources("AWS::Lambda::Function")
     handlers = {body["Properties"]["Handler"] for body in fns.values()}
     assert handlers == {"liveness.lambda_handler", "applicants.lambda_handler",
-                        "review_api.lambda_handler"}
+                        "review_api.lambda_handler", "accounts.lambda_handler",
+                        "demo.lambda_handler"}
 
 
 def test_liveness_function_has_no_dynamodb_query_permission(template: Template) -> None:
@@ -178,23 +255,12 @@ def test_review_function_can_send_task_success_and_failure(template: Template) -
     assert "states:SendTaskFailure" in actions
 
 
-def test_review_function_can_receive_but_not_delete_review_messages(template: Template) -> None:
-    """The console peeks at task tokens (task 14.6, design §7.5) without consuming the message
-    — the decision is still released through review_handler.py's own SendTaskSuccess/Failure
-    path, not by this Lambda deleting from SQS."""
-    policies = template.find_resources("AWS::IAM::Policy")
-    review_policy = next(
-        body for name, body in policies.items() if "ReviewApiFunction" in name)
-    statements = review_policy["Properties"]["PolicyDocument"]["Statement"]
-    actions = set()
-    for stmt in statements:
-        action = stmt.get("Action")
-        if isinstance(action, list):
-            actions.update(action)
-        elif action:
-            actions.add(action)
-    assert "sqs:ReceiveMessage" in actions
-    assert "sqs:DeleteMessage" not in actions
+def test_review_function_cannot_touch_the_review_queue(template: Template) -> None:
+    """The console used to find task tokens by reading the review queue, and every read spent a
+    live token's redrive budget (the sixth view of a case sent its token to the DLQ). The token is
+    on the case record now, so no SQS action of any kind is granted to this function."""
+    actions = _actions_of(template, "ReviewApiFunction")
+    assert not {a for a in actions if a.startswith("sqs:")}, actions
 
 
 def test_applicants_function_can_send_to_the_real_ingress_queue(template: Template) -> None:
@@ -210,10 +276,66 @@ def test_applicants_function_can_send_to_the_real_ingress_queue(template: Templa
     assert sqs_statements, "no sqs:SendMessage grant found"
 
 
-def test_cors_allows_get_and_post_only(template: Template) -> None:
+def test_cors_allows_get_post_and_the_demo_put(template: Template) -> None:
     template.has_resource_properties(
         "AWS::ApiGatewayV2::Api",
         {"CorsConfiguration": Match.object_like({
-            "AllowMethods": Match.array_with(["GET", "POST"]),
+            "AllowMethods": ["GET", "POST", "PUT"],
         })},
     )
+
+
+def _actions_of(template: Template, function_logical_prefix: str) -> set[str]:
+    actions: set[str] = set()
+    for name, body in template.find_resources("AWS::IAM::Policy").items():
+        if function_logical_prefix not in name:
+            continue
+        for stmt in body["Properties"]["PolicyDocument"]["Statement"]:
+            action = stmt.get("Action")
+            actions.update(action if isinstance(action, list) else [action])
+    return actions
+
+
+def _statement(template: Template, sid: str) -> dict:
+    for body in template.find_resources("AWS::IAM::Policy").values():
+        for stmt in body["Properties"]["PolicyDocument"]["Statement"]:
+            if stmt.get("Sid") == sid:
+                return stmt
+    raise AssertionError(f"no statement {sid}")
+
+
+def test_the_account_routes_can_only_invoke_the_account_platform(template: Template) -> None:
+    assert _actions_of(template, "AccountsFunction") == {"lambda:InvokeFunction"}
+    assert _statement(template, "UseAccountPlatform")["Resource"] == (
+        "arn:aws:lambda:us-east-1:123456789012:function:kyc90-account-stub")
+
+
+def test_the_demo_function_writes_only_the_two_controls(template: Template) -> None:
+    resources = _statement(template, "WriteDemoControls")["Resource"]
+    assert resources == [
+        "arn:aws:ssm:us-east-1:123456789012:parameter/kyc90/demo/faults",
+        "arn:aws:ssm:us-east-1:123456789012:parameter/kyc90/screening/list-overlay"]
+    assert _statement(template, "PublishListUpdate")["Resource"] == (
+        "arn:aws:events:us-east-1:123456789012:event-bus/kyc90-lifecycle")
+    actions = _actions_of(template, "DemoFunction")
+    for forbidden in ("dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:Scan",
+                      "lambda:InvokeFunction", "states:StartExecution"):
+        assert forbidden not in actions, forbidden
+
+
+def test_the_liveness_function_reads_and_writes_by_key_only(template: Template) -> None:
+    actions = _actions_of(template, "LivenessFunction")
+    assert {"dynamodb:GetItem", "dynamodb:UpdateItem"} <= actions
+    assert "dynamodb:Query" not in actions and "dynamodb:Scan" not in actions
+
+
+def test_the_trace_view_can_read_every_phases_executions(template: Template) -> None:
+    resources = _statement(template, "ReadExecutionHistoryForTrace")["Resource"]
+    assert len(resources) == 3
+
+
+def test_api_lambdas_ship_no_tests(template: Template) -> None:
+    """A packaged conftest would mutate `sys.path` inside the runtime."""
+    from kyc.api_stack import _ASSET_EXCLUDES
+
+    assert "tests" in _ASSET_EXCLUDES

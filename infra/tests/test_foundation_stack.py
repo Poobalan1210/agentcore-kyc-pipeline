@@ -16,6 +16,7 @@ from aws_cdk.assertions import Match, Template
 
 from kyc.config import (
     AGENTS,
+    EVIDENCE_LOCKS,
     JURISDICTIONS,
     OBJECT_LOCK_YEARS,
     InferenceOption,
@@ -46,7 +47,8 @@ def test_every_evidence_bucket_has_object_lock_enabled(template: Template) -> No
 
 def test_object_lock_is_compliance_mode_and_seven_years(template: Template) -> None:
     """Governance mode allows privileged users to delete. Compliance mode does not, which is
-    the entire point. Seven years, not five (B-12, B-13, D-09)."""
+    the entire point. Seven years, not five (B-12, B-13, D-09). This is also what a stack built
+    without a choice gets: the demo lock is only ever asked for."""
     buckets = template.find_resources("AWS::S3::Bucket")
     evidence = {k: v for k, v in buckets.items() if "EvidenceBucket" in k}
     for logical_id, body in evidence.items():
@@ -57,6 +59,22 @@ def test_object_lock_is_compliance_mode_and_seven_years(template: Template) -> N
             f"{logical_id} retention is {rule['Days']} days, expected "
             f"{365 * OBJECT_LOCK_YEARS}"
         )
+
+
+def test_the_demo_lock_is_governance_for_one_day_with_object_lock_still_on() -> None:
+    """D-35. A demo's documents carry the presenter's real face, so its evidence must stay
+    removable: GOVERNANCE (an administrator can bypass it) for one day. Object Lock itself stays
+    enabled, because it cannot be added to a bucket later."""
+    app = cdk.App()
+    stack = FoundationStack(app, "TestFoundationDemo", evidence_lock=EVIDENCE_LOCKS["DEMO"],
+                            env=cdk.Environment(account="123456789012", region="us-east-1"))
+    buckets = Template.from_stack(stack).find_resources("AWS::S3::Bucket")
+    evidence = {k: v for k, v in buckets.items() if "EvidenceBucket" in k}
+    assert len(evidence) == len(JURISDICTIONS)
+    for logical_id, body in evidence.items():
+        assert body["Properties"]["ObjectLockEnabled"] is True, logical_id
+        rule = body["Properties"]["ObjectLockConfiguration"]["Rule"]["DefaultRetention"]
+        assert (rule["Mode"], rule["Days"]) == ("GOVERNANCE", 1), logical_id
 
 
 def test_every_evidence_bucket_allows_cross_origin_put_only(template: Template) -> None:
@@ -287,8 +305,9 @@ def test_session_quota_is_regional_not_global() -> None:
     assert session_quota("us-west-2") == 5000
     assert session_quota("eu-west-2") == 2500
     assert session_quota("ap-southeast-2") == 2500
-    assert max_concurrent_applicants("us-east-1") == 1000
-    assert max_concurrent_applicants("ap-southeast-2") == 500
+    # Four agents per applicant on the approval path; the Briefing agent runs only on review.
+    assert max_concurrent_applicants("us-east-1") == 1250
+    assert max_concurrent_applicants("ap-southeast-2") == 625
 
 
 def test_seven_agents_five_in_phase_one() -> None:

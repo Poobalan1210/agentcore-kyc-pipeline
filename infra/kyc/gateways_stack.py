@@ -68,12 +68,27 @@ def _pascal_schema(node: dict) -> dict:
     return out
 
 
+#: The two modes a Gateway can attach its policy engine in. Deliberately a closed set.
+POLICY_ENFORCEMENT_MODES = ("LOG_ONLY", "ENFORCE")
+
+
 class GatewaysStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, *,
                  gateway_role_arn: str,
                  tools_lambda_arn: str,
+                 policy_enforcement: str = "LOG_ONLY",
                  **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        # R14.6. LOG_ONLY until the decisions it logs have been checked against real traffic
+        # (`scripts/check_policy_decisions.py`), then ENFORCE via `-c policyEnforcement=ENFORCE`.
+        # Switching blind is the one way this control fails *open* in practice: if a permit's
+        # principal is spelled wrong, ENFORCE denies every tool call, every case degrades to
+        # review, and the talk's clean case never opens an account.
+        if policy_enforcement not in POLICY_ENFORCEMENT_MODES:
+            raise ValueError(f"policy_enforcement must be one of {POLICY_ENFORCEMENT_MODES}, "
+                             f"got {policy_enforcement!r}")
+        self.policy_enforcement = policy_enforcement
 
         self.gateways: dict[str, cdk.CfnResource] = {}
         self.policy_engines: dict[str, cdk.CfnResource] = {}
@@ -97,8 +112,8 @@ class GatewaysStack(Stack):
                     # the difference is deliberate rather than an inconsistency.
                     "Name": f"kyc90_policy_{j.code}",
                     "Description": (
-                        f"Cedar policy engine for {j.name}. Attached LOG_ONLY until "
-                        f"thresholds are tuned on observed scores (R14.6)."),
+                        f"Cedar policy engine for {j.name}. Attached LOG_ONLY until its logged "
+                        f"decisions are checked against real traffic, then ENFORCE (R14.6)."),
                 },
             )
             engine.apply_removal_policy(RemovalPolicy.DESTROY)
@@ -130,7 +145,7 @@ class GatewaysStack(Stack):
                     "AuthorizerType": "AWS_IAM",
                     "PolicyEngineConfiguration": {
                         "Arn": engine.get_att("PolicyEngineArn").to_string(),
-                        "Mode": "LOG_ONLY",
+                        "Mode": policy_enforcement,
                     },
                 },
             )
@@ -139,7 +154,7 @@ class GatewaysStack(Stack):
             self.gateways[j.code] = gateway
 
             # ---------------------------------------------------------- targets (3.2)
-            # All seven tools on every Gateway, all pointing at the one Lambda. Cedar is what
+            # All six tools on every Gateway, all pointing at the one Lambda. Cedar is what
             # decides which agent may call which tool (R14.2); the Gateway just makes them
             # addressable.
             for tool, target_name in TARGET_NAMES.items():
@@ -191,14 +206,15 @@ class GatewaysStack(Stack):
                     # "TARGET_NAME" fails a pattern constraint with no hint as to why.
                     "DimensionKeys": ["targetName"],
                     "Entries": [
-                        # Phase 1 tools sit on the blocking path; generous but bounded.
-                        _limit("SanctionsExact", 600),
+                        # Phase 1 tools sit on the blocking path; generous but bounded. Screening
+                        # also serves Phase 3's list-update rescreens, which fan out across the
+                        # customer base, so it shares the Phase 1 ceiling.
+                        _limit("SanctionsScreen", 600),
                         _limit("DocumentStore", 600),
                         _limit("FaceCompare", 300),
                         _limit("VelocityStore", 600),
                         # R8.4: Phase 2 batch work gets a lower ceiling so a re-KYC sweep
                         # cannot starve Phase 1 of tool capacity.
-                        _limit("SanctionsFuzzy", 120),
                         _limit("PepList", 120),
                         _limit("AdverseMedia", 60),
                         # Explicit wildcard default. Without it an unlisted target is

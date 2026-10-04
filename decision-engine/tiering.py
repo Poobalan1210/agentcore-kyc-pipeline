@@ -31,17 +31,27 @@ def preliminary_tier(inputs: PreliminaryInputs) -> TierDecision:
 
     Rule order is the specification's order and it is load-bearing, not incidental::
 
-        pre_screen_matched          -> PROHIBITED   (R4.3, blocks the provisional account)
-        document_confidence < 0.8   -> HIGH
-        velocity_signals.critical   -> HIGH
-        jurisdiction_risk == HIGH   -> MEDIUM
-        otherwise                   -> LOW
+        pre_screen_matched / a CONFIRMED alert  -> PROHIBITED   (R4.3, blocks the account)
+        a PROBABLE or POSSIBLE alert            -> HIGH         (R27.5, a human's call)
+        document_confidence < 0.8               -> HIGH
+        velocity_signals.critical               -> HIGH
+        jurisdiction_risk == HIGH               -> MEDIUM
+        otherwise                               -> LOW
+
+    Only a CONFIRMED alert prohibits. An earlier version prohibited on any alert at all, which would
+    have rejected, with the reason code SCREENING_CONFIRMED_MATCH, every applicant whose name merely
+    resembled a listing — the 90-95% of alerts that are false positives (B-08).
     """
     threshold = config.DOCUMENT_CONFIDENCE_THRESHOLD
     snapshot = _preliminary_snapshot(inputs)
 
     if inputs.pre_screen_matched:
         return _decide(RiskTier.PROHIBITED, "P1.pre_screen_matched", snapshot)
+    if any(h.strength is MatchStrength.CONFIRMED for h in inputs.screening_hits):
+        return _decide(RiskTier.PROHIBITED, "P1.screening_hit_confirmed", snapshot)
+    if any(h.strength in (MatchStrength.PROBABLE, MatchStrength.POSSIBLE)
+           for h in inputs.screening_hits):
+        return _decide(RiskTier.HIGH, "P1.screening_hit_unresolved", snapshot)
     if inputs.document_confidence < threshold:
         return _decide(RiskTier.HIGH, "P1.document_confidence_below_threshold", snapshot)
     if inputs.velocity_signals.critical:
@@ -111,6 +121,11 @@ def _preliminary_snapshot(i: PreliminaryInputs) -> dict[str, object]:
         "velocity_critical": i.velocity_signals.critical,
         "velocity_detail": list(i.velocity_signals.detail),
         "product_applied": i.product_applied,
+        "screening_hits": [
+            {"list_id": h.list_id, "strength": h.strength.value,
+             "matched_on": list(h.matched_on), "score": h.score}
+            for h in i.screening_hits
+        ],
     }
 
 

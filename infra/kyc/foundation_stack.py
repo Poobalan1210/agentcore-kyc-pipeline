@@ -9,7 +9,8 @@
 
 Contents:
   1.2  six KMS keys — four per-jurisdiction, one for reasoning traces, one for the case store
-  1.3  four S3 evidence buckets, Object Lock Compliance mode, 7-year retention
+  1.3  four S3 evidence buckets, Object Lock: Compliance mode for 7 years, or Governance for a
+       day in a demo deployment (D-35)
   1.4  DynamoDB case store per design 9.1
   1.5  ten IAM roles — seven harness, one Gateway, one Step Functions, one Pipe
 """
@@ -29,17 +30,23 @@ from constructs import Construct
 
 from .config import (
     AGENTS,
+    EVIDENCE_LOCKS,
     JURISDICTIONS,
-    OBJECT_LOCK_YEARS,
     PROJECT,
+    EvidenceLock,
 )
 
 
 class FoundationStack(Stack):
     """KMS, S3 with Object Lock, DynamoDB, and the ten IAM roles."""
 
-    def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
+    def __init__(self, scope: Construct, construct_id: str, *,
+                 evidence_lock: EvidenceLock = EVIDENCE_LOCKS["COMPLIANCE"],
+                 **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
+        # COMPLIANCE unless the app says otherwise: a stack built without a choice gets the
+        # regulated posture, never the demo one by accident.
+        self.evidence_lock = evidence_lock
 
         self.jurisdiction_keys: dict[str, kms.Key] = {}
         self.evidence_buckets: dict[str, s3.Bucket] = {}
@@ -136,12 +143,15 @@ class FoundationStack(Stack):
                 server_access_logs_prefix=f"evidence-{j.code}/",
                 # THE irreversible line. object_lock_enabled cannot be turned on later.
                 object_lock_enabled=True,
-                object_lock_default_retention=s3.ObjectLockRetention.compliance(
-                    # Seven years, not five. Australia and Japan both require 7 (B-12, B-13),
-                    # so a single floor of 7 satisfies all four markets and is the binding
-                    # requirement in two of them rather than a safety margin.
-                    duration=cdk.Duration.days(365 * OBJECT_LOCK_YEARS)
-                ),
+                # The default retention can change in place, and only affects what is written
+                # after the change. COMPLIANCE is seven years, not five: Australia and Japan
+                # both require 7 (B-12, B-13), so one floor satisfies all four markets. A demo
+                # deployment uses GOVERNANCE for a day instead (config.EVIDENCE_LOCKS, D-35).
+                object_lock_default_retention=(
+                    s3.ObjectLockRetention.compliance
+                    if self.evidence_lock.mode == "COMPLIANCE"
+                    else s3.ObjectLockRetention.governance
+                )(duration=cdk.Duration.days(self.evidence_lock.days)),
                 removal_policy=RemovalPolicy.RETAIN,
                 # R32.6/R33.1 — documents are uploaded by the browser straight to S3 with a
                 # presigned PUT (`api/applicants.py`'s `presign_document`), never proxied through
@@ -310,6 +320,26 @@ class FoundationStack(Stack):
                     f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:gateway/*"],
             ))
 
+            # DIV-2: Notify is the one harness with Memory on (`harnesses_stack.py`), so the
+            # service provisions a managed memory named after the harness (`kyc90_notify-<id>`)
+            # and the harness calls the memory data plane with THIS role on every invocation.
+            # Without these actions every notification failed at `ListEvents` with
+            # AccessDeniedException: both Notify steps in Phase 2 caught the error and moved on,
+            # so cases still decided correctly and the customer was never told anything.
+            # The action set is the one AWS documents for a harness execution role; the
+            # resource is scoped to this harness's own memory, never `memory/*`.
+            if agent.key == "notify":
+                role.add_to_policy(iam.PolicyStatement(
+                    sid="OwnManagedMemory",
+                    actions=["bedrock-agentcore:CreateEvent",
+                             "bedrock-agentcore:DeleteEvent",
+                             "bedrock-agentcore:GetEvent",
+                             "bedrock-agentcore:ListEvents",
+                             "bedrock-agentcore:RetrieveMemoryRecords"],
+                    resources=[f"arn:aws:bedrock-agentcore:{self.region}:{self.account}:"
+                               f"memory/{PROJECT}_{agent.key}-*"],
+                ))
+
             # R11.7 / F-09: InvokeAgentRuntimeCommand bypasses the model loop and ignores
             # allowedTools, so it is denied explicitly rather than merely left ungranted.
             # Note the neighbouring action InvokeAgentRuntime is REQUIRED by the Step
@@ -423,6 +453,9 @@ class FoundationStack(Stack):
         cdk.CfnOutput(self, "TraceKeyArn", value=self.trace_key.key_arn)
         cdk.CfnOutput(self, "BiometricBucketName",
                       value=self.biometric_bucket.bucket_name)
+        cdk.CfnOutput(self, "EvidenceLock", value=(
+            f"{self.evidence_lock.name}: {self.evidence_lock.mode} "
+            f"{self.evidence_lock.days} day(s)"))
         cdk.CfnOutput(self, "StateMachineRoleArn", value=self.sfn_role.role_arn)
         cdk.CfnOutput(self, "GatewayRoleArn", value=self.gateway_role.role_arn)
         for key, role in self.harness_roles.items():

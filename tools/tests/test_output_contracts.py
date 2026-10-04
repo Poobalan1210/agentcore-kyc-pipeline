@@ -43,7 +43,7 @@ class TestSchemas:
         Router, Identity, Compliance and Notify instructed by their own prompts to "call the submit
         tool" when no such tool existed, and the runtime rejected the tool-use block outright."""
         assert set(ALL_OUTPUT_CONTRACTS) == {
-            "router", "documents", "identity", "fraud", "prescreen", "compliance", "notify"}
+            "briefing", "documents", "identity", "fraud", "prescreen", "compliance", "notify"}
         assert len(set(ALL_OUTPUT_CONTRACTS.values())) == 7
 
     def test_each_contract_has_a_gateway_target(self):
@@ -184,7 +184,7 @@ class TestRegistration:
     def test_each_contract_sits_in_its_agents_phase(self):
         """Compliance and Notify run in Phase 2, so their contracts belong there. Mixing them into
         Phase 1 would offer an agent a tool for work it does not do in that phase."""
-        PHASE1_AGENTS = ("router", "documents", "identity", "fraud", "prescreen")
+        PHASE1_AGENTS = ("briefing", "documents", "identity", "fraud", "prescreen")
         PHASE2_AGENTS = ("compliance", "notify")
 
         for agent in PHASE1_AGENTS:

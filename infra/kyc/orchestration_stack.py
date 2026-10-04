@@ -28,7 +28,15 @@ from aws_cdk import aws_stepfunctions as sfn
 from constructs import Construct
 
 from .asl import phase1_definition, phase2_definition
-from .config import AGENTS, PROJECT
+from .config import (
+    AGENTS,
+    DEMO_FAULTS_PARAMETER,
+    EVIDENCE_LOCKS,
+    LIST_OVERLAY_PARAMETER,
+    PHASE1_EVIDENCE_AGENTS,
+    PROJECT,
+    EvidenceLock,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -55,6 +63,15 @@ class OrchestrationStack(Stack):
         harness_endpoint_arns: dict[str, str],
         trace_log_group_names: dict[str, str],
         model_ids: dict[str, str],
+        # The account platform. Phase 1 opens the account on it and Phase 2 moves its
+        # restrictions; the case record says what was decided, the platform enforces it.
+        account_function_arn: str,
+        # R18.6's four pins for every decision record: endpoint, harness versions, policy engine
+        # (with its enforcement mode) and the Gateway that actually served the tools.
+        audit_pins: dict[str, str],
+        # The retention every decision record is written under. Must be the same lock the
+        # evidence buckets default to, so the app passes one value to both stacks (D-35).
+        evidence_lock: EvidenceLock = EVIDENCE_LOCKS["COMPLIANCE"],
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -115,6 +132,8 @@ class OrchestrationStack(Stack):
                 "CASE_TABLE_NAME": case_table_name,
                 "AUDIT_BUCKET_NAME": audit_bucket_name,
                 "AUDIT_KMS_KEY_ID": audit_key_arn,
+                "AUDIT_LOCK_MODE": evidence_lock.mode,
+                "AUDIT_RETENTION_DAYS": str(evidence_lock.days),
                 # The real per-agent AgentCore trace groups, comma-separated — NOT a single
                 # guessed group. This was f"/aws/bedrock-agentcore/{PROJECT}", a log group that
                 # does not exist and never did: AgentCore writes to
@@ -144,8 +163,9 @@ class OrchestrationStack(Stack):
         ))
         self.audit_writer.add_to_role_policy(iam.PolicyStatement(
             sid="WriteObjectLockedRecord",
-            # No DeleteObject, and none is possible anyway under Compliance mode. Withholding it
-            # keeps the intent legible rather than relying on the bucket to enforce it.
+            # No DeleteObject (and no governance bypass in a demo deployment): the writer only
+            # ever adds records. Withholding it keeps the intent legible rather than relying on
+            # the bucket to enforce it.
             actions=["s3:PutObject", "s3:PutObjectRetention"],
             resources=[f"{audit_bucket_arn}/*"],
         ))
@@ -281,7 +301,12 @@ class OrchestrationStack(Stack):
             decision_engine_arn=self.decision_engine.function_arn,
             audit_writer_arn=self.audit_writer.function_arn,
             review_queue_url=self.review_queue.queue_url,
+            account_function_arn=account_function_arn,
+            audit_pins=audit_pins,
         )
+        parameter_arns = [
+            f"arn:aws:ssm:{self.region}:{self.account}:parameter{name}"
+            for name in (DEMO_FAULTS_PARAMETER, LIST_OVERLAY_PARAMETER)]
 
         # One explicit policy, created before either state machine, so the grant is in place when
         # Step Functions validates it. `add_to_principal_policy` on an imported role would create
@@ -295,7 +320,16 @@ class OrchestrationStack(Stack):
                     sid="InvokeOrchestrationLambdas",
                     actions=["lambda:InvokeFunction"],
                     resources=[self.decision_engine.function_arn,
-                               self.audit_writer.function_arn],
+                               self.audit_writer.function_arn,
+                               account_function_arn],
+                ),
+                iam.PolicyStatement(
+                    # Read only, and only these two. Phase 1 reads the demo fault flags so a
+                    # presenter can shorten an agent's time on stage, and both phases read the
+                    # screening list version so no decision rests on an outdated list.
+                    sid="ReadRuntimeControls",
+                    actions=["ssm:GetParameter"],
+                    resources=parameter_arns,
                 ),
                 iam.PolicyStatement(
                     sid="ReadWriteCaseRecord",
@@ -360,7 +394,8 @@ class OrchestrationStack(Stack):
             state_machine_name=phase1_name,
             role_arn=sfn_role.role_arn,
             definition=phase1_definition(
-                **common, phase2_state_machine_arn=self.phase2.attr_arn),
+                **common, phase2_state_machine_arn=self.phase2.attr_arn,
+                controls_parameter=DEMO_FAULTS_PARAMETER),
             state_machine_type="STANDARD",
             tracing_configuration=sfn.CfnStateMachine.TracingConfigurationProperty(enabled=True),
             logging_configuration=self._logging(
@@ -376,7 +411,8 @@ class OrchestrationStack(Stack):
         cdk.CfnOutput(self, "AuditWriterArn", value=self.audit_writer.function_arn)
         cdk.CfnOutput(
             self, "AgentCount", value=str(len(AGENTS)),
-            description="Seven agents across two phases, five in Phase 1.")
+            description=(f"Seven agents: {len(PHASE1_EVIDENCE_AGENTS)} on the Phase 1 approval "
+                         "path, the reviewer Briefing, and two in Phase 2."))
 
     # --- helpers ---------------------------------------------------------------------------
 

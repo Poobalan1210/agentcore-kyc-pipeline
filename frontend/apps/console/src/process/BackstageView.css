@@ -1,0 +1,970 @@
+/*
+ * The live process: the phone's steps, each phase as a timeline on its own clock, and the feed.
+ * Colours by what did the work, the same in the bars, the feed and the legend of the lanes:
+ * the state machine sky, agents violet, rules green, the sealed record gold, the account indigo,
+ * a person orange, messages to the customer pink.
+ */
+
+.bs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------------ the phone */
+
+.tl-phone {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 10px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+}
+
+.tl-phone--active {
+  border-color: rgba(56, 189, 248, 0.45);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.14);
+}
+
+.tl-phone__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.tl-phone__steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tl-phone__step {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.tl-phone__step .process-mark {
+  width: 24px;
+  height: 24px;
+}
+
+.tl-phone__text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.tl-phone__text b {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--color-text);
+}
+
+.tl-phone__text small {
+  overflow: hidden;
+  font-size: 11.5px;
+  color: var(--color-text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-phone__step--idle .tl-phone__text b {
+  color: var(--color-text-secondary);
+}
+
+/* ------------------------------------------------------------------ a phase */
+
+.tl-card {
+  container-type: inline-size;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.tl-card--active:not(.tl-card--steady) {
+  border-color: rgba(56, 189, 248, 0.45);
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.16), 0 18px 48px rgba(14, 116, 144, 0.18);
+}
+
+.tl-card--warn {
+  border-color: var(--color-warning-border);
+}
+
+.tl-card--fail {
+  border-color: var(--color-danger-border);
+}
+
+.tl-card__head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 13px 16px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tl-card__titles h3 {
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.tl-card__titles p {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.tl-card__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.tl-card__clock {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--color-text-secondary);
+}
+
+.tl-card__state {
+  padding: 2px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-neutral-bg);
+  color: var(--color-text-secondary);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.tl-card__state--active {
+  border-color: var(--color-running-border);
+  background: var(--color-running-bg);
+  color: var(--color-running);
+}
+
+.tl-card__state--steady {
+  border-color: var(--color-running-border);
+  background: var(--color-running-bg);
+  color: var(--color-running);
+}
+
+.tl-card__state--done {
+  border-color: var(--color-success-border);
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.tl-card__state--warn {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.tl-card__state--fail {
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.tl-card__console {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--color-accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.tl-card__console:hover {
+  text-decoration: underline;
+}
+
+/* The arrow points right; up and to the right says "opens elsewhere". */
+.tl-card__console-icon {
+  transform: rotate(-45deg);
+}
+
+.tl-card__empty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+}
+
+.tl-card__empty--steady {
+  color: var(--color-text-secondary);
+}
+
+.tl-card__pulse {
+  position: relative;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-running);
+  box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.5);
+  animation: tl-beacon 2.4s ease-out infinite;
+}
+
+/* ------------------------------------------------------------------ the timeline grid */
+
+.tl {
+  position: relative;
+  padding: 2px 0 8px;
+}
+
+.tl-row {
+  display: grid;
+  grid-template-columns: 196px minmax(0, 1fr) 236px;
+  align-items: center;
+  column-gap: 14px;
+  min-height: 38px;
+  padding: 0 16px;
+}
+
+.tl-row + .tl-row {
+  border-top: 1px solid rgba(148, 163, 184, 0.07);
+}
+
+.tl-row__label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 5px 10px 5px 0;
+  line-height: 1.3;
+}
+
+.tl-row__track {
+  position: relative;
+  height: 38px;
+}
+
+.tl-row__result {
+  min-width: 0;
+}
+
+.tl-row--axis {
+  min-height: 42px;
+}
+
+.tl-row--axis .tl-row__track {
+  height: 42px;
+}
+
+.tl-axis__caption {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.tl-tick {
+  position: absolute;
+  top: 5px;
+  transform: translateX(-50%);
+  font: 11px var(--font-mono);
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+
+.tl-tick--first {
+  transform: none;
+}
+
+.tl-tick--last {
+  transform: translateX(-100%);
+}
+
+.tl-axis-flag {
+  position: absolute;
+  top: 22px;
+  padding-left: 7px;
+  font: 700 11px var(--font-mono);
+  white-space: nowrap;
+}
+
+.tl-axis-flag--end {
+  padding-left: 0;
+  padding-right: 7px;
+  transform: translateX(-100%);
+}
+
+.tl-axis-flag--decided {
+  color: var(--color-success);
+}
+
+.tl-axis-flag--now {
+  color: var(--color-running);
+}
+
+.tl-axis-flag--target {
+  color: var(--color-text-tertiary);
+  font-weight: 600;
+}
+
+/* Lines drawn down every lane at the same x. */
+.tl-grid {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.tl-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  pointer-events: none;
+}
+
+.tl-line--decided {
+  background: var(--color-success);
+  box-shadow: 0 0 10px rgba(52, 211, 153, 0.55);
+}
+
+.tl-line--now {
+  background: var(--color-running);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.7);
+}
+
+.tl-line--target {
+  width: 0;
+  margin-left: 0;
+  border-left: 1px dashed rgba(148, 163, 184, 0.4);
+}
+
+/* While nothing has run yet, the lanes wait under one line of text. */
+.tl--waiting .tl-lane {
+  opacity: 0.55;
+}
+
+.tl__note {
+  position: absolute;
+  left: 226px;
+  right: 266px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 10px 14px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: rgba(13, 19, 35, 0.92);
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+
+/* ------------------------------------------------------------------ lanes */
+
+.tl-lane {
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.tl-lane:hover,
+.tl-lane--open {
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.tl-lane__name {
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tl-lane__name:hover {
+  text-decoration: underline;
+}
+
+.tl-lane__name:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.tl-lane__sub {
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-lane--empty .tl-lane__name {
+  color: var(--color-text-secondary);
+}
+
+/* The four evidence agents run at once: one bracket down their labels. */
+.tl-lane--parallel .tl-row__label {
+  box-shadow: inset -2px 0 0 rgba(167, 139, 250, 0.6);
+}
+
+.tl-lane--first .tl-row__label {
+  border-top-right-radius: 6px;
+}
+
+.tl-lane--last .tl-row__label {
+  border-bottom-right-radius: 6px;
+}
+
+/* ------------------------------------------------------------------ bars */
+
+.tl-seg {
+  position: absolute;
+  top: 10px;
+  display: flex;
+  align-items: center;
+  height: 18px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+
+.tl-seg__label {
+  padding: 0 8px;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+}
+
+.tl-seg--queue {
+  background: rgba(148, 163, 184, 0.2);
+  border-color: rgba(148, 163, 184, 0.35);
+}
+
+.tl-seg--sfn {
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.32), rgba(56, 189, 248, 0.18));
+  border-color: rgba(56, 189, 248, 0.5);
+  color: #bae6fd;
+}
+
+.tl-seg--agent {
+  background: linear-gradient(90deg, rgba(167, 139, 250, 0.42), rgba(124, 92, 255, 0.24));
+  border-color: rgba(167, 139, 250, 0.55);
+  color: #ede9fe;
+}
+
+.tl-seg--rules {
+  background: rgba(52, 211, 153, 0.32);
+  border-color: rgba(52, 211, 153, 0.6);
+}
+
+.tl-seg--seal {
+  background: rgba(251, 191, 36, 0.3);
+  border-color: rgba(251, 191, 36, 0.6);
+}
+
+.tl-seg--account {
+  background: rgba(154, 162, 255, 0.32);
+  border-color: rgba(154, 162, 255, 0.6);
+}
+
+.tl-seg--review {
+  background: repeating-linear-gradient(
+    135deg,
+    rgba(251, 146, 60, 0.28) 0 6px,
+    rgba(251, 146, 60, 0.14) 6px 12px
+  );
+  border-color: rgba(251, 146, 60, 0.6);
+  color: #fed7aa;
+}
+
+.tl-seg--notify {
+  background: rgba(244, 114, 182, 0.3);
+  border-color: rgba(244, 114, 182, 0.55);
+}
+
+/* Still running: drawn to now, with a sweep and a bright leading edge. */
+.tl-seg--running {
+  background-size: 200% 100%;
+  box-shadow: inset -2px 0 0 rgba(255, 255, 255, 0.75);
+}
+
+.tl-seg--running::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.16), transparent);
+  animation: tl-sweep 1.6s linear infinite;
+}
+
+.tl-seg--failed {
+  background: rgba(251, 113, 133, 0.32);
+  border-color: rgba(251, 113, 133, 0.7);
+  color: #fecdd3;
+}
+
+/* ------------------------------------------------------------------ marks */
+
+.tl-mark {
+  position: absolute;
+  z-index: 2;
+}
+
+/* A tool recording its fact: the moment the rules could read it. */
+.tl-mark--fact {
+  top: 13px;
+  width: 12px;
+  height: 12px;
+  margin-left: -6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.25), 0 0 12px rgba(52, 211, 153, 0.65);
+}
+
+.tl-mark--flag {
+  top: 5px;
+  height: 28px;
+  border-left: 2px solid var(--color-accent);
+}
+
+.tl-mark__label {
+  position: absolute;
+  top: 0;
+  left: 5px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: var(--color-accent);
+  white-space: nowrap;
+}
+
+.tl-mark--message {
+  top: 14px;
+  width: 10px;
+  height: 10px;
+  margin-left: -5px;
+  border-radius: 2px;
+  background: #f472b6;
+  box-shadow: 0 0 10px rgba(244, 114, 182, 0.6);
+  transform: rotate(45deg);
+}
+
+/* ------------------------------------------------------------------ results */
+
+.tl-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.tl-result::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-tertiary);
+  opacity: 0.6;
+}
+
+.tl-result--done::before {
+  background: var(--color-success);
+  opacity: 1;
+}
+
+.tl-result--warn::before {
+  background: var(--color-warning);
+  opacity: 1;
+}
+
+.tl-result--fail::before {
+  background: var(--color-danger);
+  opacity: 1;
+}
+
+.tl-result--active::before {
+  background: var(--color-running);
+  opacity: 1;
+  animation: tl-blink 1.2s ease-in-out infinite;
+}
+
+.tl-result__text {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--color-text);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.tl-result--warn .tl-result__text {
+  color: var(--color-warning);
+}
+
+.tl-result--fail .tl-result__text {
+  color: var(--color-danger);
+}
+
+.tl-result--idle .tl-result__text,
+.tl-result--skip .tl-result__text {
+  color: var(--color-text-tertiary);
+}
+
+.tl-result__none {
+  color: var(--color-text-tertiary);
+}
+
+.tl-result__action {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--color-warning-border);
+  border-radius: 999px;
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.tl-result__action:hover {
+  background: rgba(251, 191, 36, 0.2);
+}
+
+/* ------------------------------------------------------------------ a lane's detail */
+
+.tl-detail {
+  margin: 2px 16px 10px 226px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-muted);
+  font-size: 12.5px;
+  animation: kyc-fade-up 160ms ease both;
+}
+
+.tl-detail__by {
+  font-weight: 650;
+  color: var(--color-text-secondary);
+}
+
+.tl-detail__summary {
+  margin-top: 3px;
+  color: var(--color-text);
+}
+
+.tl-detail__rows {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 3px 14px;
+  margin: 8px 0 0;
+}
+
+.tl-detail__rows div {
+  display: contents;
+}
+
+.tl-detail__rows dt {
+  color: var(--color-text-tertiary);
+}
+
+.tl-detail__rows dd {
+  margin: 0;
+  color: var(--color-text-secondary);
+  word-break: break-word;
+}
+
+.tl-detail__states {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 9px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tl-detail__state {
+  padding: 1px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  font: 11px var(--font-mono);
+  color: var(--color-text-secondary);
+}
+
+.tl-detail__state--failed {
+  border-color: var(--color-danger-border);
+  color: var(--color-danger);
+}
+
+.tl-detail__state--running {
+  border-color: var(--color-running-border);
+  color: var(--color-running);
+}
+
+/* ------------------------------------------------------------------ the feed */
+
+.tl-feed {
+  container-type: inline-size;
+  overflow: hidden;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.tl-feed__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tl-feed__head h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14.5px;
+  font-weight: 700;
+}
+
+.tl-feed__head p {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.tl-feed__count {
+  min-width: 28px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--color-neutral-bg);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: center;
+}
+
+.tl-feed__list {
+  max-height: 330px;
+  margin: 0;
+  padding: 6px 0 8px;
+  overflow-y: auto;
+  list-style: none;
+  font: 12px/1.5 var(--font-mono);
+  scrollbar-width: thin;
+}
+
+.tl-feed__item {
+  display: grid;
+  grid-template-columns: 96px 152px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 3px 16px;
+  transition: background-color 1.2s ease;
+}
+
+.tl-feed__item--new {
+  background: rgba(56, 189, 248, 0.07);
+}
+
+.tl-feed__item time {
+  color: var(--color-text-tertiary);
+}
+
+.tl-feed__text {
+  overflow: hidden;
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-feed__item--success .tl-feed__text {
+  color: var(--color-success);
+}
+
+.tl-feed__item--warning .tl-feed__text {
+  color: var(--color-warning);
+}
+
+.tl-feed__item--danger .tl-feed__text {
+  color: var(--color-danger);
+}
+
+.tl-feed__empty {
+  padding: 14px 16px 16px;
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+}
+
+.tl-src {
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 7px;
+  border-radius: 5px;
+  font: 600 11px/18px var(--font-sans);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tl-src--api,
+.tl-src--ddb {
+  background: rgba(148, 163, 184, 0.16);
+  color: var(--color-text-secondary);
+}
+
+.tl-src--ddb {
+  background: rgba(96, 165, 250, 0.16);
+  color: #bfdbfe;
+}
+
+.tl-src--pipes,
+.tl-src--sfn,
+.tl-src--events {
+  background: rgba(56, 189, 248, 0.16);
+  color: #bae6fd;
+}
+
+.tl-src--agent {
+  background: rgba(167, 139, 250, 0.18);
+  color: #ddd6fe;
+}
+
+.tl-src--tool {
+  background: rgba(52, 211, 153, 0.12);
+  color: #a7f3d0;
+  font-family: var(--font-mono);
+}
+
+.tl-src--rules {
+  background: rgba(52, 211, 153, 0.16);
+  color: #a7f3d0;
+}
+
+.tl-src--seal {
+  background: rgba(251, 191, 36, 0.16);
+  color: #fde68a;
+}
+
+.tl-src--account {
+  background: rgba(154, 162, 255, 0.18);
+  color: #c7d2fe;
+}
+
+.tl-src--notify {
+  background: rgba(244, 114, 182, 0.16);
+  color: #fbcfe8;
+}
+
+.tl-src--review {
+  background: rgba(251, 146, 60, 0.16);
+  color: #fed7aa;
+}
+
+/* ------------------------------------------------------------------ narrow: the case page */
+
+@container (max-width: 760px) {
+  .tl-row {
+    grid-template-columns: 132px minmax(0, 1fr);
+  }
+
+  .tl-row__result {
+    grid-column: 2;
+    padding-bottom: 6px;
+  }
+
+  .tl-row--axis .tl-row__result {
+    display: none;
+  }
+
+  .tl-detail {
+    margin-left: 16px;
+  }
+
+  .tl__note {
+    left: 160px;
+    right: 16px;
+  }
+
+  .tl-feed__item {
+    grid-template-columns: 84px minmax(0, 1fr);
+  }
+
+  .tl-feed__item .tl-src {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------------------ motion */
+
+@keyframes tl-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes tl-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes tl-beacon {
+  0% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(56, 189, 248, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(56, 189, 248, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tl-seg--running::after,
+  .tl-result--active::before,
+  .tl-card__pulse {
+    animation: none;
+  }
+}

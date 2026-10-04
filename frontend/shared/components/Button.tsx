@@ -9,9 +9,8 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 /**
- * The one button component every app uses. Deliberately has no size prop beyond the default —
- * a proliferation of button sizes is how a design system drifts into inconsistency across three
- * separately-built apps (task 14.5/14.6/14.7).
+ * The one button component the console uses. Deliberately has no size prop beyond the default:
+ * a proliferation of button sizes is how a design system drifts into inconsistency.
  */
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ variant = "secondary", loading = false, disabled, children, className, ...rest }, ref) => {

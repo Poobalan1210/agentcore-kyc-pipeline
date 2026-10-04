@@ -1,12 +1,16 @@
 """Tools stack — task 2.8.
 
-One Lambda hosting seven tools with name-based dispatch, plus the account platform stub and the
-velocity store.
+One Lambda hosting the six evidence tools with name-based dispatch, the account platform stub and
+its table, the velocity store, and the two runtime control parameters.
 
 Provisioned concurrency needs a version and an alias, not the `$LATEST` function. Task 2.2 asks
-for it on the four Phase 1 tools; since all seven share one function, the alias carries it and
-the Phase 2 tools get it as a side effect. That is a cost decision worth naming rather than
-hiding: warm capacity is billed continuously, and A-15 measures whether it is worth it.
+for it on the Phase 1 tools; since all six share one function, the alias carries it and the Phase 2
+tools get it as a side effect. That is a cost decision worth naming rather than hiding: warm
+capacity is billed continuously, and A-15 measures whether it is worth it.
+
+The alias is also why the controls are parameters. The Gateway calls `live`, a published version,
+so an environment variable edited on the function never reaches a Gateway call. The tools read the
+parameters per call instead (`tools/kyctools/controls.py`).
 """
 
 from __future__ import annotations
@@ -24,10 +28,16 @@ from aws_cdk import (
     aws_lambda as lambda_,
     aws_logs as logs,
     aws_s3 as s3,
+    aws_ssm as ssm,
 )
 from constructs import Construct
 
-from .config import PROJECT
+from .config import DEMO_FAULTS_PARAMETER, LIST_OVERLAY_PARAMETER, PROJECT
+
+#: Never shipped in a deployment package: conftests mutate `sys.path`, which is harmless locally
+#: and the sort of thing that resolves a module to the wrong file in a packaged runtime.
+_ASSET_EXCLUDES = ["tests", "tests/*", "test_*.py", "pytest.ini", "__pycache__", "*.pyc",
+                   ".pytest_cache"]
 
 # Resolved from this file rather than from the working directory, matching `api_stack.py`. A
 # relative `"../tools"` only works when CDK is invoked from `infra/`, so synthesising from anywhere
@@ -47,9 +57,9 @@ class ToolsStack(Stack):
                  # COMPLIANCE mode would make that impossible. `rekognition_compare_faces` needs to
                  # read it, which is why the tools Lambda is granted access to a second bucket.
                  biometric_bucket_name: str,
-                 # The submit_* output contracts write each agent's structured finding here
-                 # (R11.13, F-89), which is what lets the state machine read data instead of
-                 # parsing the model's prose.
+                 # Every evidence tool reads its inputs from the case record and records its
+                 # result there, which is what lets the rules decide on recorded facts instead of
+                 # on the model's prose.
                  case_table_name: str,
                  case_table_arn: str,
                  case_key_arn: str,
@@ -72,6 +82,26 @@ class ToolsStack(Stack):
             removal_policy=RemovalPolicy.DESTROY,
         )
 
+        # ------------------------------------------------------------ runtime controls
+        #
+        # Created with neutral values. The demo API's presenter routes change them on stage, and a
+        # later deploy leaves those changes alone unless these defaults change. Both are plain
+        # strings holding JSON; neither holds anything secret.
+        self.demo_faults_parameter = ssm.StringParameter(
+            self, "DemoFaults",
+            parameter_name=DEMO_FAULTS_PARAMETER,
+            string_value="{}",
+            description=("Demo fault flags: {unavailableTools: [...], agentTimeouts: {agent: s}}. "
+                         "Fail open, and can only send a case to a person, never approve one."),
+        )
+        self.list_overlay_parameter = ssm.StringParameter(
+            self, "ListOverlay",
+            parameter_name=LIST_OVERLAY_PARAMETER,
+            string_value='{"entries": []}',
+            description=("Sanctions list update published on top of the synthetic list: "
+                         "{version, entries[]}. Fails closed: unreadable means unavailable."),
+        )
+
         # ------------------------------------------------------------ the tool Lambda
         # An explicit LogGroup rather than `log_retention`, which is deprecated and creates a
         # custom-resource Lambda plus its own IAM role purely to set a retention value.
@@ -88,13 +118,15 @@ class ToolsStack(Stack):
             runtime=lambda_.Runtime.PYTHON_3_12,
             architecture=lambda_.Architecture.ARM_64,
             handler="handler.handler",
-            code=lambda_.Code.from_asset(_TOOLS_ASSET_PATH),
+            code=lambda_.Code.from_asset(_TOOLS_ASSET_PATH, exclude=_ASSET_EXCLUDES),
             timeout=Duration.seconds(30),
             memory_size=1024,
             log_group=self.tools_log_group,
             environment={
                 "VELOCITY_TABLE": self.velocity_table.table_name,
                 "CASE_TABLE": case_table_name,
+                "DEMO_FAULTS_PARAMETER": DEMO_FAULTS_PARAMETER,
+                "LIST_OVERLAY_PARAMETER": LIST_OVERLAY_PARAMETER,
                 # So the face-compare tool can default the liveness frame's bucket rather than
                 # trusting an agent to name it. A model that guessed the wrong bucket would produce
                 # an unreadable-image finding that looks like a bad document.
@@ -106,18 +138,26 @@ class ToolsStack(Stack):
                 "LOG_LEVEL": "INFO",
                 "POWERTOOLS_SERVICE_NAME": f"{PROJECT}-tools",
             },
-            description="Seven KYC tools, name-based dispatch. Ported pattern from P-10.",
+            description=("Six KYC evidence tools, name-based dispatch. Each reads its inputs from "
+                         "the case record and records its result there."),
         )
 
         self.velocity_table.grant_read_write_data(self.tools_fn)
 
-        # UpdateItem only, and no GetItem. The contract tools write one nested key each and never
-        # read the case, so withholding read access means a compromised tool cannot enumerate
-        # applicants — the findings path needs to deposit, not to browse.
+        # GetItem and UpdateItem on the case record, by key only: no Query, no Scan. The tools
+        # read the identity, documents and liveness frame the applicant submitted — so an agent
+        # cannot choose what is checked — and record what they found. Without Query or Scan a
+        # compromised tool can read a case it is named for, but cannot enumerate applicants.
         self.tools_fn.add_to_role_policy(iam.PolicyStatement(
-            sid="RecordAgentFindings",
-            actions=["dynamodb:UpdateItem"],
+            sid="ReadCaseRecordFacts",
+            actions=["dynamodb:GetItem", "dynamodb:UpdateItem"],
             resources=[case_table_arn],
+        ))
+        self.tools_fn.add_to_role_policy(iam.PolicyStatement(
+            sid="ReadRuntimeControls",
+            actions=["ssm:GetParameter"],
+            resources=[self.demo_faults_parameter.parameter_arn,
+                       self.list_overlay_parameter.parameter_arn],
         ))
         kms.Key.from_key_arn(self, "CaseKeyForFindings", case_key_arn).grant_encrypt_decrypt(
             self.tools_fn)
@@ -175,6 +215,24 @@ class ToolsStack(Stack):
         )
 
         # ------------------------------------------------------------ account stub
+        #
+        # A stand-in for the core banking platform, and the part of the demo that makes a
+        # restriction real: the state machines move the account's posture, and a transfer the
+        # posture forbids is refused here with the restriction that refused it (R31.2).
+        #
+        # One item per account plus one per transaction, under the same partition. DESTROY, not
+        # RETAIN: this is a stub platform with demo balances, not a record of any decision — the
+        # decisions live in the case table, the history table and the Object Lock bucket.
+        self.account_table = dynamodb.Table(
+            self, "AccountTable",
+            table_name=f"{PROJECT}-accounts",
+            partition_key=dynamodb.Attribute(
+                name="applicantId", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="sk", type=dynamodb.AttributeType.STRING),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
         self.account_log_group = logs.LogGroup(
             self, "AccountStubLogGroup",
             log_group_name=f"/aws/lambda/{PROJECT}-account-stub",
@@ -188,20 +246,25 @@ class ToolsStack(Stack):
             runtime=lambda_.Runtime.PYTHON_3_12,
             architecture=lambda_.Architecture.ARM_64,
             handler="account_stub.handler",
-            code=lambda_.Code.from_asset(_ACCOUNT_STUB_ASSET_PATH),
+            code=lambda_.Code.from_asset(_ACCOUNT_STUB_ASSET_PATH, exclude=_ASSET_EXCLUDES),
             timeout=Duration.seconds(10),
             memory_size=512,
             log_group=self.account_log_group,
             environment={
-                # D-10 is open; these are placeholders pending the product's risk appetite.
+                "ACCOUNT_TABLE": self.account_table.table_name,
+                # D-10 is open; a placeholder pending the product's risk appetite.
                 "PROVISIONAL_DEPOSIT_CEILING": "2000",
-                "PROVISIONAL_CASH_LIMIT": "250",
             },
-            description=("Account platform stub. Enforces the five R31.1 restrictions as a "
-                         "transaction authoriser, not an advisory flag (R31.2)."),
+            description=("Account platform stub. Enforces restrictions as a transaction "
+                         "authoriser, not an advisory flag (R31.2): a provisional account takes "
+                         "deposits up to a ceiling and lets no money leave."),
         )
+        self.account_table.grant_read_write_data(self.account_fn)
 
         cdk.CfnOutput(self, "ToolsFunctionArn", value=self.tools_fn.function_arn)
         cdk.CfnOutput(self, "ToolsAliasArn", value=self.tools_alias.function_arn)
         cdk.CfnOutput(self, "AccountStubArn", value=self.account_fn.function_arn)
+        cdk.CfnOutput(self, "AccountTableName", value=self.account_table.table_name)
         cdk.CfnOutput(self, "VelocityTableName", value=self.velocity_table.table_name)
+        cdk.CfnOutput(self, "DemoFaultsParameter", value=DEMO_FAULTS_PARAMETER)
+        cdk.CfnOutput(self, "ListOverlayParameter", value=LIST_OVERLAY_PARAMETER)

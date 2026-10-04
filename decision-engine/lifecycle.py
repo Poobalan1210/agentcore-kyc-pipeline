@@ -38,6 +38,7 @@ from config import TIER_ACTIONS
 from models import (
     FullInputs,
     LifecycleDecision,
+    MatchStrength,
     Phase3Outcome,
     RiskEvent,
     RiskEventSeverity,
@@ -93,16 +94,21 @@ def next_due_days(tier: RiskTier) -> int | None:
     return None if interval is None else RE_KYC_DAYS[interval]
 
 
-def history_sort_key(decided_at: str, version: int) -> str:
-    """Sort key for the append-only decision history: `DECISION#<iso>#<zero-padded version>`.
+def history_sort_key(occurred_at: str, event_id: str) -> str:
+    """Sort key for the append-only decision history: `DECISION#<event time>#<event id>`.
 
-    Zero-padded because DynamoDB sorts sort keys lexicographically — `#10` must not order before
-    `#2`. The partition key is the customer id, so a single query returns the whole history in
-    decision order, which is the reconstruction an examiner asks for.
+    Derived from the event, never from the run that processed it. The earlier key used the
+    execution's start time, so a replayed event produced a *new* key, the `attribute_not_exists`
+    guard on the history write passed, and one event wrote two decisions — the exact duplicate the
+    guard existed to refuse. Two deliveries of one event now compute one key, and the second write
+    is rejected.
+
+    The partition key is the customer id, and ISO timestamps sort lexicographically, so a single
+    query returns the whole history in event order: the reconstruction an examiner asks for.
     """
-    if version < 1:
-        raise ValueError(f"version must be >= 1, got {version}")
-    return f"DECISION#{decided_at}#{version:04d}"
+    if not occurred_at or not event_id:
+        raise ValueError("occurred_at and event_id are both required")
+    return f"DECISION#{occurred_at}#{event_id}"
 
 
 def idempotency_name(customer_id: str, event_id: str) -> str:
@@ -174,6 +180,46 @@ def reassess(
     tier = full_tier(new_evidence)
     new_tier = tier.tier
 
+    # A confirmed sanctions match found by a re-screen is a prohibition, not a risk movement to be
+    # weighed: the account is frozen now and a human confirms the match afterwards. Waiting for the
+    # review before freezing would leave a sanctioned person able to move money in the meantime,
+    # and sanctions breaches are strict liability.
+    if new_tier is RiskTier.PROHIBITED:
+        return LifecycleDecision(
+            case_id=day0.case_id,
+            outcome=Phase3Outcome.FREEZE,
+            day0_tier=day0.tier,
+            new_tier=new_tier,
+            version=version,
+            decided_at=decided_at,
+            event_id=event.event_id,
+            next_review_days=None,
+            rationale=(f"{event.event_type} produced {tier.rule}. Frozen pending compliance "
+                       f"review; the day-zero decision is preserved unchanged."),
+        )
+
+    # A screening alert that no reviewer has cleared is a person's call even when the tier did not
+    # move. Comparing tiers alone, a customer approved at HIGH — a PEP under enhanced due diligence,
+    # say — who then partially matches a new listing is still HIGH, and the list update would be
+    # logged as "risk unchanged". Alerts a reviewer cleared are already gone from the evidence
+    # (their dispositions are applied before this runs), so what remains here is new.
+    unresolved = [h.list_id for h in new_evidence.screening_hits
+                  if h.strength in (MatchStrength.PROBABLE, MatchStrength.POSSIBLE)]
+    if unresolved and not risk_increased(day0.tier, new_tier):
+        return LifecycleDecision(
+            case_id=day0.case_id,
+            outcome=Phase3Outcome.RISK_INCREASED_REVIEW,
+            day0_tier=day0.tier,
+            new_tier=new_tier,
+            version=version,
+            decided_at=decided_at,
+            event_id=event.event_id,
+            next_review_days=next_due_days(new_tier),
+            rationale=(f"{event.event_type} produced screening alerts no reviewer has cleared "
+                       f"({', '.join(sorted(unresolved))}); escalated for review. The day-zero "
+                       "decision is preserved."),
+        )
+
     if not risk_increased(day0.tier, new_tier):
         return LifecycleDecision(
             case_id=day0.case_id,
@@ -188,9 +234,9 @@ def reassess(
                        f"Monitoring continues."),
         )
 
-    # Risk went up. HIGH and PROHIBITED need a human because the action at those tiers is EDD or a
-    # freeze, and neither is a decision this layer is allowed to take unilaterally (R4.7).
-    if new_tier in (RiskTier.HIGH, RiskTier.PROHIBITED):
+    # Risk went up. HIGH needs a human because the action at that tier is enhanced due diligence,
+    # which this layer is not allowed to take unilaterally (R4.7).
+    if new_tier is RiskTier.HIGH:
         outcome = Phase3Outcome.RISK_INCREASED_REVIEW
         action = "escalated for enhanced due diligence"
     else:

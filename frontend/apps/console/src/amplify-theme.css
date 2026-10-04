@@ -1,0 +1,153 @@
+/*
+ * Amplify UI theme overrides, so the sign-in form and `FaceLivenessDetector` use the console's
+ * tokens instead of Amplify's stock palette.
+ *
+ * Three mistakes this file has had before, each of which left a screen unthemed:
+ *
+ * 1. Wrong token family. The liveness component reads `--amplify-colors-primary-*`, not
+ *    `--amplify-colors-brand-primary-*`; Amplify's own stylesheet points `primary-*` at teal, so
+ *    without these the oval and its progress arc render in stock teal. All seven steps of a ramp
+ *    must exist or the component falls back to teal for the missing ones.
+ * 2. Wrong scope. `[data-amplify-authenticator]` wraps the sign-in form and not the detector, so
+ *    the overrides live on `:root`.
+ * 3. One scope for two palettes. The console is dark and the phone's screen is light
+ *    (`.kyc-light`). A custom property that refers to another is resolved where it is declared, so
+ *    the mapping below is declared again on `.kyc-light`: there it resolves against the light
+ *    tokens, and the detector inside the phone renders light while the sign-in form renders dark.
+ *
+ * Deliberately not changed: oval geometry, countdown duration and face-fit timeout. AWS documents
+ * these as affecting the security and accuracy of the check, so only colour is themed here.
+ */
+
+/* The ramps: violet on the dark console, indigo in the bank's light app. */
+:root,
+[data-amplify-theme] {
+  --amplify-colors-primary-10: #1b1d3a;
+  --amplify-colors-primary-20: #262a55;
+  --amplify-colors-primary-40: #4c51b8;
+  --amplify-colors-primary-60: #8188ff;
+  --amplify-colors-primary-80: #6e6bff;
+  --amplify-colors-primary-90: #5b57f0;
+  --amplify-colors-primary-100: #4a45d6;
+}
+
+.kyc-light {
+  --amplify-colors-primary-10: #eef2ff;
+  --amplify-colors-primary-20: #e0e7ff;
+  --amplify-colors-primary-40: #a5b4fc;
+  --amplify-colors-primary-60: #6366f1;
+  --amplify-colors-primary-80: #4f46e5;
+  --amplify-colors-primary-90: #4338ca;
+  --amplify-colors-primary-100: #3730a3;
+}
+
+/* The mapping, resolved separately in each palette. */
+:root,
+[data-amplify-theme],
+.kyc-light {
+  --amplify-colors-brand-primary-10: var(--amplify-colors-primary-10);
+  --amplify-colors-brand-primary-20: var(--amplify-colors-primary-20);
+  --amplify-colors-brand-primary-40: var(--amplify-colors-primary-40);
+  --amplify-colors-brand-primary-60: var(--amplify-colors-primary-60);
+  --amplify-colors-brand-primary-80: var(--amplify-colors-primary-80);
+  --amplify-colors-brand-primary-90: var(--amplify-colors-primary-90);
+  --amplify-colors-brand-primary-100: var(--amplify-colors-primary-100);
+
+  --amplify-components-liveness-camera-module-background-color: var(--color-surface);
+
+  --amplify-colors-font-primary: var(--color-text);
+  --amplify-colors-font-secondary: var(--color-text-secondary);
+  --amplify-colors-font-tertiary: var(--color-text-tertiary);
+  --amplify-colors-font-interactive: var(--color-accent);
+  --amplify-colors-background-primary: var(--color-surface);
+  --amplify-colors-background-secondary: var(--color-surface-raised);
+  --amplify-colors-background-tertiary: var(--color-surface-muted);
+  --amplify-colors-border-primary: var(--color-border-strong);
+  --amplify-colors-border-secondary: var(--color-border);
+  --amplify-colors-border-tertiary: var(--color-border);
+  --amplify-colors-border-focus: var(--color-accent);
+  --amplify-fonts-default-static: var(--font-sans);
+  --amplify-fonts-default-variable: var(--font-sans);
+  --amplify-radii-small: var(--radius-sm);
+  --amplify-radii-medium: var(--radius-md);
+
+  --amplify-components-field-label-color: var(--color-text-secondary);
+  --amplify-components-fieldcontrol-color: var(--color-text);
+  --amplify-components-fieldcontrol-border-color: var(--color-border-strong);
+  --amplify-components-fieldcontrol-focus-border-color: var(--color-accent);
+  --amplify-components-fieldcontrol-focus-box-shadow: 0 0 0 3px var(--color-accent-ring);
+
+  --amplify-components-button-color: var(--color-text);
+  --amplify-components-button-border-color: var(--color-border-strong);
+  --amplify-components-button-hover-color: var(--color-text);
+  --amplify-components-button-hover-background-color: var(--color-neutral-bg);
+  --amplify-components-button-hover-border-color: var(--color-text-tertiary);
+  --amplify-components-button-focus-color: var(--color-text);
+  --amplify-components-button-focus-background-color: var(--color-neutral-bg);
+  --amplify-components-button-active-color: var(--color-text);
+  --amplify-components-button-active-background-color: var(--color-neutral-bg);
+  --amplify-components-button-link-color: var(--color-accent);
+  --amplify-components-button-link-hover-color: var(--color-accent-hover);
+  --amplify-components-button-link-hover-background-color: transparent;
+  --amplify-components-button-link-focus-color: var(--color-accent-hover);
+  --amplify-components-button-link-focus-background-color: transparent;
+  --amplify-components-button-link-active-color: var(--color-accent-hover);
+  --amplify-components-button-link-active-background-color: transparent;
+  --amplify-components-button-primary-color: var(--color-on-accent);
+  --amplify-components-button-primary-background-color: var(--color-accent-strong);
+  --amplify-components-button-primary-hover-background-color: var(--amplify-colors-primary-90);
+  --amplify-components-button-primary-focus-background-color: var(--amplify-colors-primary-90);
+  --amplify-components-button-primary-active-background-color: var(--amplify-colors-primary-100);
+  --amplify-components-passwordfield-button-color: var(--color-text-secondary);
+  --amplify-components-passwordfield-button-hover-color: var(--color-text);
+  --amplify-components-passwordfield-button-hover-background-color: var(--color-neutral-bg);
+  --amplify-components-passwordfield-button-focus-color: var(--color-text);
+  --amplify-components-passwordfield-button-focus-background-color: var(--color-neutral-bg);
+  --amplify-components-passwordfield-button-active-color: var(--color-text);
+  --amplify-components-passwordfield-button-active-background-color: var(--color-neutral-bg);
+  --amplify-components-alert-error-color: var(--color-danger);
+  --amplify-components-alert-error-background-color: var(--color-danger-bg);
+  --amplify-components-tabs-item-active-color: var(--color-accent);
+  --amplify-components-tabs-item-active-border-color: var(--color-accent);
+}
+
+/* The sign-in card sits inside the console's own sign-in layout, so it brings no page padding,
+   border or background of its own: the glass card around it is the console's. */
+[data-amplify-authenticator] [data-amplify-container] {
+  width: 100%;
+  max-width: 420px;
+}
+
+[data-amplify-authenticator] [data-amplify-router] {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+[data-amplify-authenticator] [data-amplify-form] {
+  padding: 0;
+}
+
+[data-amplify-authenticator] .amplify-input,
+[data-amplify-authenticator] .amplify-field-group__outer-end .amplify-button {
+  background: var(--color-input-bg);
+}
+
+[data-amplify-authenticator] .amplify-input {
+  min-height: 44px;
+  font-size: 15px;
+}
+
+[data-amplify-authenticator] .amplify-button--primary {
+  min-height: 46px;
+  background: var(--gradient-accent);
+  box-shadow: var(--shadow-accent);
+  font-weight: 650;
+}
+
+[data-amplify-authenticator] .amplify-button--primary:hover {
+  filter: brightness(1.08);
+}
+
+/* The detector's own frame and parts are styled where it runs: `applicant/liveness.css`. */

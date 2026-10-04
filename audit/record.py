@@ -147,6 +147,17 @@ class DecisionRecord:
     # execution was started directly rather than via the ingress queue (the synchronous API
     # contract, replay/ops tooling): an unmeasured datum must never read as an instant one.
     ingress_latency_ms: float | None = None
+    # The Step Functions execution that decided, so the record leads back to its timeline.
+    execution_name: str | None = None
+    # When a person decided: what the rules had concluded, why the case went to them, and the
+    # screening alerts their approval cleared. Without these the record of an approval says that a
+    # reviewer approved, not what they approved past.
+    engine_outcome: str | None = None
+    review_reason: str | None = None
+    cleared_alerts: tuple[str, ...] = ()
+    # A Phase 2 decision names the provisional decision it supersedes, so the two immutable
+    # records of one application join without the mutable case record.
+    supersedes_decision_id: str | None = None
 
     def __post_init__(self) -> None:
         # Freezing the nested mappings closes the obvious hole in `frozen=True`: the dataclass
@@ -175,6 +186,7 @@ def build_decision_record(
     actor: str = "system",
     sources: Sequence[EvidenceSource] | None = None,
     ingress_latency_ms: float | None = None,
+    execution_name: str | None = None,
 ) -> DecisionRecord | IncompleteRecord:
     """Assemble one decision record, or explain why it cannot be assembled.
 
@@ -240,15 +252,17 @@ def build_decision_record(
         actor=actor,
         outcome=str(outcome.get("outcome") or ""),
         rule=str(outcome.get("rule") or ""),
-        reason_code=_opt_str(outcome.get("reason_code")),
+        reason_code=_opt_str(_either(outcome, "reason_code", "reasonCode")),
         explanation=_opt_str(outcome.get("explanation")),
-        required_item=_opt_str(outcome.get("required_item")),
-        notify_compliance=bool(outcome.get("notify_compliance")),
-        tier=_opt_str(outcome.get("tier")),
-        tier_rule=_opt_str(outcome.get("tier_rule")),
-        tier_inputs=dict(outcome.get("tier_inputs") or {}),
-        thresholds_in_force=dict(outcome.get("thresholds_in_force") or {}),
-        edge_cases=tuple(str(e) for e in outcome.get("edge_cases") or ()),
+        required_item=_opt_str(_either(outcome, "required_item", "requiredItem")),
+        notify_compliance=bool(_either(outcome, "notify_compliance", "notifyCompliance")),
+        tier=_opt_str(outcome.get("tier") or outcome.get("newTier")),
+        tier_rule=_opt_str(_either(outcome, "tier_rule", "tierRule")),
+        tier_inputs=dict(_either(outcome, "tier_inputs", "tierInputs") or {}),
+        thresholds_in_force=dict(
+            _either(outcome, "thresholds_in_force", "thresholdsInForce") or {}),
+        edge_cases=tuple(str(e) for e in
+                         _either(outcome, "edge_cases", "edgeCasesMatched") or ()),
         agent_runs=tuple(_agent_run_payload(r) for r in evidence.agent_runs),
         tool_calls=tuple(_tool_call_payload(c) for c in evidence.tool_calls),
         liveness=_liveness_payload(case_record.get("liveness")),
@@ -260,7 +274,22 @@ def build_decision_record(
         sources=tuple(sorted(s.value for s in supplied)),
         span_count=evidence.span_count,
         ingress_latency_ms=ingress_latency_ms,
+        execution_name=_opt_str(execution_name),
+        engine_outcome=_opt_str(_either(outcome, "engine_outcome", "engineOutcome")),
+        review_reason=_opt_str(_either(outcome, "review_reason", "reviewReason")),
+        cleared_alerts=tuple(str(a) for a in
+                             _either(outcome, "cleared_alerts", "clearedAlerts") or ()),
+        supersedes_decision_id=_opt_str(
+            _either(outcome, "supersedes_decision_id", "supersedesDecisionId")),
     )
+
+
+def _either(outcome: Mapping[str, Any], snake: str, camel: str) -> Any:
+    """A field in either spelling. The state machine passes the engine's response as it is,
+    in camelCase, and reading only the snake_case name silently dropped the tier inputs,
+    thresholds and reason code from every record written from it."""
+    value = outcome.get(snake)
+    return value if value is not None else outcome.get(camel)
 
 
 def outcome_to_mapping(decision: Any) -> dict[str, Any]:
@@ -329,7 +358,12 @@ def to_payload(record: DecisionRecord) -> dict[str, Any]:
             "tierInputs": dict(record.tier_inputs),
             "thresholdsInForce": dict(record.thresholds_in_force),
             "edgeCases": list(record.edge_cases),
+            "engineOutcome": record.engine_outcome,
+            "reviewReason": record.review_reason,
+            "clearedAlerts": list(record.cleared_alerts),
         },
+        "executionName": record.execution_name,
+        "supersedesDecisionId": record.supersedes_decision_id,
         "evidence": {
             "agentRuns": [dict(r) for r in record.agent_runs],
             "toolCalls": [dict(c) for c in record.tool_calls],

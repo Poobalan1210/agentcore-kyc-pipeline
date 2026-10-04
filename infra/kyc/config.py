@@ -182,8 +182,16 @@ class Agent:
 
 
 AGENTS: tuple[Agent, ...] = (
-    Agent("router", "kyc-jurisdiction-router", Phase.ONE, "Router", 5,
-          "Classify the applicant into US/UK/AU/JP from document country."),
+    # Formerly the jurisdiction Router, which sat first on the 90-second path and classified the
+    # applicant into US/UK/AU/JP from the passport country. Two problems, both measured in the
+    # code rather than argued: its `CheckJurisdiction` edge read a field the harness envelope never
+    # carries, so it could never fire; and the question it answered is not a judgement. Which law
+    # applies is decided by which bank entity the customer applies to — a fact the API validates —
+    # not by where their passport was issued. So the slot now does agent work that is genuinely
+    # judgement: explaining a case to the human reviewer. It runs only on the review path, never
+    # on the approval path, and it never decides.
+    Agent("briefing", "kyc-review-briefing", Phase.ONE, "Briefing", 3,
+          "Explain the recorded evidence to the human reviewer. Never decides."),
     Agent("documents", "kyc-document-analysis", Phase.ONE, "Documents", 10,
           "Extract and validate document fields.", ("doc_extract",)),
     Agent("identity", "kyc-identity", Phase.ONE, "Identity", 10,
@@ -204,11 +212,16 @@ AGENTS: tuple[Agent, ...] = (
     # most dangerous shape of failure in this system.
     Agent("fraud", "kyc-fraud", Phase.ONE, "Fraud", 12,
           "Velocity and synthetic-identity signals.", ("velocity_check",)),
-    Agent("prescreen", "kyc-sanctions-prescreen", Phase.ONE, "PreScreen", 5,
-          "Exact-match sanctions pre-screen only. Fail closed.", ("sanctions_exact",)),
+    # Screening runs in full here, exact and variant, before the account opens. It used to be
+    # exact-only with variants deferred to Phase 2 — but by Phase 2 the account is already open,
+    # sanctions breaches are strict liability, and the variant matcher is plain code that takes
+    # milliseconds. Phase 3 re-runs the same agent when a list update is published.
+    Agent("prescreen", "kyc-sanctions-screen", Phase.ONE, "PreScreen", 5,
+          "Sanctions screening of the recorded identity, exact and variant. Fail closed.",
+          ("sanctions_screen",)),
     Agent("compliance", "kyc-compliance-risk", Phase.TWO, "ComplianceRisk", 12,
-          "Fuzzy sanctions, PEP association, adverse media.",
-          ("sanctions_fuzzy", "pep_lookup", "adverse_media"), "high"),
+          "PEP association and adverse media disambiguation.",
+          ("pep_lookup", "adverse_media"), "high"),
     Agent("notify", "kyc-customer-experience", Phase.TWO, "Notify", 8,
           "Applicant notification copy."),
 )
@@ -217,9 +230,51 @@ AGENT_BY_KEY = {a.key: a for a in AGENTS}
 PHASE1_AGENTS = tuple(a for a in AGENTS if a.phase is Phase.ONE)
 PHASE2_AGENTS = tuple(a for a in AGENTS if a.phase is Phase.TWO)
 
+#: The four agents on the 90-second approval path, run in parallel. The Briefing agent is Phase 1
+#: too, but only on the review path: it never stands between an applicant and an account.
+PHASE1_EVIDENCE_AGENTS: tuple[str, ...] = ("documents", "identity", "fraud", "prescreen")
+
+#: Where each recorded fact lives on the case record, keyed by the decision engine's fact names.
+#: The tools write these (`tools/kyctools/case_record.py` FACT_ATTRIBUTES) and the state machines
+#: pass them to the engine untouched; `infra/tests/test_asl.py` asserts the two tables agree, so a
+#: renamed attribute cannot quietly turn every fact into "absent".
+CASE_FACT_ATTRIBUTES: dict[str, str] = {
+    "documentExtraction": "documentExtraction",
+    "faceMatch": "factFaceMatch",
+    "screening": "factScreening",
+    "velocity": "factVelocity",
+    "pep": "factPep",
+    "adverseMedia": "factAdverseMedia",
+}
+
+#: Jurisdictions whose rules this deployment decides. Four Gateways exist (F-04) but every agent is
+#: attached to the US one, so a case filed with another entity goes to a human rather than being
+#: decided under the wrong law (R12.4).
+DECIDED_JURISDICTIONS: tuple[str, ...] = ("us",)
+
+#: The synthetic screening list's own version (`tools/kyctools/data/sanctions.py` LIST_VERSION). The
+#: state machines compose the version in force from it and the published list update, exactly as
+#: the screening tool does, so the rules can refuse a screening of an outdated list.
+#: `infra/tests/test_jsonata_expressions.py` asserts the two compositions agree.
+SCREENING_LIST_BASE_VERSION = "SYNTHETIC-2026-10-01"
+
+#: R30.2 / D-05. Mirrors `decision-engine/config.py`: below it a failed liveness check is retried;
+#: at it the checks run and the rules route the case to a reviewer, with no lockout.
+LIVENESS_FAILURE_LIMIT = 3
+
 # ---------------------------------------------------------------------------- constants
 PRIMARY_REGION = "us-east-1"
 PROJECT = "kyc90"
+
+#: Runtime controls, in SSM Parameter Store and read per call. Parameters rather than environment
+#: variables because the Gateway invokes the tools Lambda's published `live` alias: an environment
+#: edit creates no new version, so it would never reach a Gateway call.
+#:
+#: Demo faults can only push a case towards a human — a tool reported unavailable, an agent given
+#: less time — never towards an approval, so they fail open (absent means no faults). The list
+#: overlay is a sanctions list update, so it fails closed: unreadable means screening is unavailable.
+DEMO_FAULTS_PARAMETER = f"/{PROJECT}/demo/faults"
+LIST_OVERLAY_PARAMETER = f"/{PROJECT}/screening/list-overlay"
 
 # R11.14 / F-46: the Step Functions Task dies at 15 minutes but the harness keeps running
 # and keeps billing (F-14). maxLifetime is the only control that stops it, and the service
@@ -230,9 +285,43 @@ HARNESS_IDLE_TIMEOUT_SECONDS = 120
 # R17.2 / B-12 / B-13 / D-09: one floor of 7 years satisfies US, UK, EU, AU and JP.
 OBJECT_LOCK_YEARS = 7
 
-# F-11: 5,000 active sessions in us-east-1 and us-west-2, 2,500 elsewhere. Phase 1 uses
-# five agents per applicant, so divide before quoting a concurrency number — and R20.7
-# requires it measured, not calculated.
+
+@dataclass(frozen=True)
+class EvidenceLock:
+    """How hard, and for how long, Object Lock holds every evidence object and decision record.
+
+    Object Lock itself is enabled at bucket creation either way (it cannot be added later); this
+    is the retention applied to what is written. `days` is both the buckets' default retention
+    and the audit writer's retain-until for each decision record.
+    """
+
+    name: str
+    mode: str  # "COMPLIANCE" | "GOVERNANCE", as S3 spells it
+    days: int
+
+
+#: A regulated deployment keeps COMPLIANCE for seven years: nobody, root included, can delete a
+#: record or shorten its retention. A demo uploads documents with the presenter's real face on
+#: them and decides no real person's application, so it locks in GOVERNANCE for one day (D-35):
+#: a delete is still refused, so the lock is demonstrable, but an administrator can remove an
+#: object at once with the governance bypass, and anyone can after a day.
+EVIDENCE_LOCKS: dict[str, EvidenceLock] = {
+    "COMPLIANCE": EvidenceLock("COMPLIANCE", "COMPLIANCE", 365 * OBJECT_LOCK_YEARS),
+    "DEMO": EvidenceLock("DEMO", "GOVERNANCE", 1),
+}
+
+#: D-36 — the Face Liveness challenge each session asks for, as `CreateFaceLivenessSession` names
+#: it (`api/liveness.py` holds the same pair). The light challenge is the service default and the
+#: one AWS recommends for the highest accuracy: move toward the camera, then hold still through a
+#: sequence of flashing colours. The movement challenge drops the flashes and is several seconds
+#: quicker. A demo (demo controls on) uses the movement challenge; anything else the light one.
+LIVENESS_LIGHT_CHALLENGE = "FaceMovementAndLightChallenge"
+LIVENESS_MOVEMENT_CHALLENGE = "FaceMovementChallenge"
+LIVENESS_CHALLENGES = (LIVENESS_LIGHT_CHALLENGE, LIVENESS_MOVEMENT_CHALLENGE)
+
+# F-11: 5,000 active sessions in us-east-1 and us-west-2, 2,500 elsewhere. The approval path runs
+# four agents per applicant, so divide before quoting a concurrency number — and R20.7 requires it
+# measured, not calculated.
 SESSION_QUOTA = {"us-east-1": 5000, "us-west-2": 5000}
 SESSION_QUOTA_DEFAULT = 2500
 
@@ -241,7 +330,8 @@ def session_quota(region: str) -> int:
     return SESSION_QUOTA.get(region, SESSION_QUOTA_DEFAULT)
 
 
-def max_concurrent_applicants(region: str, agents_per_applicant: int = 5) -> int:
+def max_concurrent_applicants(region: str,
+                              agents_per_applicant: int = len(PHASE1_EVIDENCE_AGENTS)) -> int:
     """Calculated ceiling. R20.7 requires the real figure to be measured under burst load;
     this exists to size alarms, not to be quoted on a slide."""
     return session_quota(region) // agents_per_applicant

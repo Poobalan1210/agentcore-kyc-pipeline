@@ -74,6 +74,17 @@ class AuthStack(Stack):
                 "Compliance reviewers — may act on the review queue (R6.3, R34.6). Membership "
                 "is provisioned out-of-band; self-sign-up never joins this group."),
         )
+        # The people running the live demo: the Demo Panel's fault switches and the sanctions list
+        # update that drives Act 3. A presenter can freeze any open account by publishing a
+        # matching listing, so this group exists only in a demo deployment and is granted by hand.
+        self.presenters_group = cognito.CfnUserPoolGroup(
+            self, "PresentersGroup",
+            user_pool_id=self.user_pool.user_pool_id,
+            group_name="presenters",
+            description=(
+                "Demo presenters — may flip demo faults and publish a synthetic list update. "
+                "Granted by hand for a demo only; never by self-sign-up."),
+        )
 
         self.user_pool_client = cognito.UserPoolClient(
             self, "UserPoolClient",

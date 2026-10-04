@@ -4,13 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev:applicant": "vite --config apps/applicant/vite.config.ts",
-    "dev:reviewer": "vite --config apps/reviewer/vite.config.ts",
-    "dev:demo": "vite --config apps/demo/vite.config.ts",
-    "build:applicant": "tsc -b apps/applicant && vite build --config apps/applicant/vite.config.ts",
-    "build:reviewer": "tsc -b apps/reviewer && vite build --config apps/reviewer/vite.config.ts",
-    "build:demo": "tsc -b apps/demo && vite build --config apps/demo/vite.config.ts",
-    "build": "npm run build:applicant && npm run build:reviewer && npm run build:demo",
+    "dev": "vite --config apps/console/vite.config.ts",
+    "build": "tsc -b apps/console && vite build --config apps/console/vite.config.ts",
+    "preview": "vite preview --config apps/console/vite.config.ts",
     "test": "vitest run",
     "lint": "eslint . --ext ts,tsx"
   },

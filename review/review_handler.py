@@ -113,7 +113,7 @@ def _returned_item(exc: Exception) -> Mapping[str, Any] | None:
     if isinstance(response, Mapping):
         item = response.get("Item")
         if isinstance(item, Mapping) and item:
-            return deserialize_item(item)
+            return _parse_phase_blobs(deserialize_item(item))
     return None
 
 
@@ -315,6 +315,7 @@ def apply_decision(
     table_name: str,
     keys: TableKeySchema,
     dynamodb: Any,
+    case: Mapping[str, Any] | None = None,
 ) -> ReviewOutcome:
     """Attempt the conditional write. A failed condition is a normal result, not an error."""
     submission = outcome.submission
@@ -322,7 +323,7 @@ def apply_decision(
     assert submission is not None and decision is not None
 
     write = build_conditional_write(
-        submission=submission, decision=decision, table_name=table_name, keys=keys)
+        submission=submission, decision=decision, table_name=table_name, keys=keys, case=case)
     try:
         # Serialize at the boundary: `decisions.py` produces plain values, the low-level client
         # requires AttributeValues. Without this the client rejects the write outright
@@ -412,7 +413,7 @@ def handle_review(
     outcome = resolve(submission=submission, case=case)
     if outcome.resolution is Resolution.ACCEPT:
         outcome = apply_decision(
-            outcome, table_name=table, keys=key_schema, dynamodb=resolved.dynamodb)
+            outcome, table_name=table, keys=key_schema, dynamodb=resolved.dynamodb, case=case)
 
     sent = close_the_loop(outcome, stepfunctions=resolved.stepfunctions)
 

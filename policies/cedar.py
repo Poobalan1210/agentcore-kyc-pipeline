@@ -22,10 +22,15 @@ docs — each cost a rejected request to find:
    so `generate.py`/`policies_stack.py` route by `Statement.kind` rather than assuming one field.
 3. **`context.input`/`context.output` alone are rejected; a guardrail dataPath needs at least one
    field segment** — `context.input.<field>`, never the bare object — with the error
-   `"Dogwood data path missing field segment"`. The field name itself is not validated against
-   the action's actual schema at policy-creation time (an unscoped `action` with a field no tool
-   declares still creates successfully), so the value chosen here documents *intent* — which
-   argument the guardrail is meant to scan — rather than a value the service enforces.
+   `"Dogwood data path missing field segment"`.
+4. **A guardrail's field must be declared by every action the statement is scoped to.** This
+   used to go unchecked. The service now rejects it: "a provider's context field-path argument
+   must be declared on every action the rule is scoped to". An unscoped `action` includes the
+   `CallTool` parent every tool action inherits from, which declares nothing, so every guardrail
+   is scoped to the Gateway actions whose tool schema declares the field it scans
+   (`_actions_declaring`). A guardrail whose field no action declares has nothing to scan and
+   produces no statement: PII suppression reads `context.output.result`, and no Gateway tool
+   declares an output schema.
 
 Four kinds of policy, per jurisdiction (R14.2, R15.1-R15.3):
 
@@ -38,7 +43,7 @@ Four kinds of policy, per jurisdiction (R14.2, R15.1-R15.3):
    `guardrails` blocks in one Cedar statement (F-16), and each statement is its own resource
    regardless.
 3. **PII suppression** — one `suppressOutput ... when guardrails` statement per suppressed
-   category (R15.2).
+   category (R15.2). None today: no Gateway tool declares an output schema to scan (see 4.).
 4. **Content filter** — one `forbid ... when guardrails` statement per filtered category
    (R15.3).
 
@@ -56,7 +61,7 @@ from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from tool_schemas import agent_tool_names, cedar_action  # noqa: E402
+from tool_schemas import SCHEMAS, agent_tool_names, cedar_action  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "infra"))
 from kyc.config import AGENT_BY_KEY, JURISDICTIONS  # noqa: E402
@@ -77,6 +82,27 @@ def _threshold(value: str) -> str:
     # One canonical spelling regardless of input form ("1", "1.0", "1.00" all match), matching
     # what the docs show: `decimal("0.4")`.
     return format(parsed, "f") if parsed != parsed.to_integral_value() else f"{int(parsed)}.0"
+
+
+def _actions_declaring(section: str, field: str) -> list[str]:
+    """The Gateway's Cedar actions whose tool schema declares `field` under `section`
+    ("input" -> `inputSchema`, "output" -> `outputSchema`), sorted so the statement text, and
+    the deployed name hashed from it, is the same on every run. `SCHEMAS` is exactly the set of
+    tools registered on the Gateways (contract tools are filtered out while disabled)."""
+    key = {"input": "inputSchema", "output": "outputSchema"}[section]
+    return sorted(cedar_action(tool) for tool, schema in SCHEMAS.items()
+                  if field in ((schema.get(key) or {}).get("properties") or {}))
+
+
+def _action_scope(actions: list[str]) -> str:
+    """The `action` clause of a guardrail's scope: exactly these actions, never the bare
+    `action`, which also covers the `CallTool` parent that declares no fields (see 4. above)."""
+    if not actions:
+        raise ValueError("a guardrail needs at least one action that declares its field")
+    if len(actions) == 1:
+        return f'action == AgentCore::Action::"{actions[0]}"'
+    listed = ", ".join(f'AgentCore::Action::"{a}"' for a in actions)
+    return f"action in [{listed}]"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -113,9 +139,9 @@ def authorization_statements(*, gateway_arn: str,
     F-35).
 
     `harness_roles` maps agent key -> role ARN (the harness execution role, D-01), covering
-    every Phase 1 and Phase 2 agent that has tools. Router and Notify have none (design §5.1's
-    tool list), so they get no statement here and therefore cannot call anything through this
-    Gateway — which is correct: they never need to.
+    every Phase 1 and Phase 2 agent that has tools. Briefing and Notify have none, so they get no
+    statement here and therefore cannot call anything through this Gateway — which is correct:
+    they never need to.
     """
     statements: list[Statement] = []
     for agent_key, role_arn in sorted(harness_roles.items()):
@@ -149,12 +175,13 @@ def prompt_injection_statements(*, gateway_arn: str,
     free-text name through, and the field an injection attempt is most plausibly smuggled in on
     across this tool set, none of which take a generic `prompt`/`message` field. A bare
     `context.input` (no field) is rejected live with "Dogwood data path missing field
-    segment"."""
+    segment". Scoped to the actions that declare `name` (the three screening tools); the other
+    tools take only the system-issued applicantId, so there is no free text there to scan."""
     t = _threshold(threshold)
     cedar = (
         f'forbid(\n'
         f'  principal,\n'
-        f'  action,\n'
+        f'  {_action_scope(_actions_declaring("input", "name"))},\n'
         f'  resource == AgentCore::Gateway::"{gateway_arn}"\n'
         f')\n'
         f'when guardrails {{\n'
@@ -171,8 +198,16 @@ def prompt_injection_statements(*, gateway_arn: str,
 def pii_suppression_statements(*, gateway_arn: str,
                                categories: tuple[str, ...] = (
                                    "US_SOCIAL_SECURITY_NUMBER", "CREDIT_DEBIT_CARD_NUMBER"),
-                               threshold: str = "0.2") -> list[Statement]:
-    """R15.2. One `suppressOutput` statement per category.
+                               threshold: str = "0.2",
+                               actions: list[str] | None = None) -> list[Statement]:
+    """R15.2. One `suppressOutput` statement per category, scoped to `actions` — by default the
+    Gateway actions whose tool declares `result` in an output schema.
+
+    **Today that is none, so this returns no statements.** No Gateway tool declares an output
+    schema, the service rejects an output field the scoped actions do not declare, and there is
+    no tool output for a guardrail to read. The statements this used to emit created on an
+    unscoped `action` and scanned nothing. Declaring output schemas on the tools is what turns
+    this on; it changes what the Gateway returns to the agents, so it needs its own live run.
 
     `SensitiveInformation` does **not** support the per-category `["CATEGORY"].confidenceScore`
     indexing the docs' `ContentFilter`/`PromptAttack` examples show — confirmed live: it fails
@@ -182,16 +217,15 @@ def pii_suppression_statements(*, gateway_arn: str,
     guardrail call (no line break, no index) is the form the service accepts.
     """
     t = _threshold(threshold)
+    actions = _actions_declaring("output", "result") if actions is None else actions
+    if not actions:
+        return []
     statements: list[Statement] = []
     for category in categories:
-        # `context.output.result` documents intent (scan the tool's return value) rather than
-        # a value the service enforces — none of the seven tools declare an output schema, and
-        # an unscoped action's guardrail field is not checked against any schema at creation
-        # time (confirmed live: an unscoped action with an arbitrary field name still creates).
         cedar = (
             f'suppressOutput(\n'
             f'  principal,\n'
-            f'  action,\n'
+            f'  {_action_scope(actions)},\n'
             f'  resource == AgentCore::Gateway::"{gateway_arn}"\n'
             f')\n'
             f'when guardrails {{\n'
@@ -211,15 +245,16 @@ def content_filter_statements(*, gateway_arn: str,
                               threshold: str = "0.2") -> list[Statement]:
     """R15.3. One `forbid` statement per filtered category — blocks the call before a tool
     runs, rather than suppressing a result after the fact, since violent/hateful *input* has no
-    legitimate completion to suppress down to. `context.input.prompt` for the same reason as
-    `prompt_injection_statements` — a bare `context.input` is rejected."""
+    legitimate completion to suppress down to. `context.input.name`, scoped to the actions that
+    declare it, for the same reasons as `prompt_injection_statements`."""
     t = _threshold(threshold)
+    scope = _action_scope(_actions_declaring("input", "name"))
     statements: list[Statement] = []
     for category in categories:
         cedar = (
             f'forbid(\n'
             f'  principal,\n'
-            f'  action,\n'
+            f'  {scope},\n'
             f'  resource == AgentCore::Gateway::"{gateway_arn}"\n'
             f')\n'
             f'when guardrails {{\n'

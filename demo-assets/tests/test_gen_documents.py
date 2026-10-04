@@ -11,15 +11,22 @@ Three things are worth asserting here and are all easy to get silently wrong:
 
 from __future__ import annotations
 
+import json
+import re
 import sys
 from pathlib import Path
 
 import pytest
 
+REPO = Path(__file__).resolve().parents[2]
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "tools"))
 
 from gen_documents import (  # noqa: E402
+    ACT3_BATCH,
+    ACT3_LIST_UPDATE,
+    ACT3_OTHER_LISTINGS,
     DEMO_IDENTITIES,
     build_mrz,
     build_pdf_bytes,
@@ -138,27 +145,167 @@ def test_printed_fields_appear_in_the_pdf():
 
 
 # ------------------------------------------------------------------ dataset safety
-def test_every_persona_name_is_disjoint_from_sanctions_ground_truth():
-    try:
-        from kyctools.data.sanctions import ALL_ENTRIES, PEP_ENTRIES
-    except ImportError:
-        pytest.skip("kyctools not importable in this environment")
+#: What screening must find for each persona: (strongest alert, alert ids, excluded ids). Run
+#: through the real matcher, against the identity the screening tool builds from the case record,
+#: so a persona cannot drift into an unintended hit — or out of its intended one.
+EXPECTED_SCREENING = {
+    "DEMO-US-01": ("NO_MATCH", [], []),
+    "DEMO-US-02": ("POSSIBLE", ["SYN-0106"], []),
+    "DEMO-US-03": ("NO_MATCH", [], []),
+    "DEMO-US-04": ("NO_MATCH", [], ["SYN-0001"]),
+    "DEMO-UK-01": ("NO_MATCH", [], []),
+    "DEMO-AU-01": ("NO_MATCH", [], []),
+    "DEMO-JP-01": ("NO_MATCH", [], []),
+}
 
-    screening = {e.name.upper() for e in ALL_ENTRIES} | {p.name.upper() for p in PEP_ENTRIES}
+
+def _screen(identity, entries=None):
+    from kyctools.case_record import screening_identity
+    from kyctools.data.sanctions import ALL_ENTRIES
+    from kyctools.matching import Candidate, screen, worst
+
+    declared = screening_identity({"declaredIdentity": {
+        "givenNames": identity.given_names, "surname": identity.surname,
+        "dateOfBirth": identity.dob, "nationality": identity.mrz_country}})
+    candidate = Candidate(name=declared.name, dob=declared.dob, country=declared.country,
+                          alternate_names=declared.alternate_names)
+    alerts, exclusions = screen(candidate, ALL_ENTRIES if entries is None else entries)
+    return (worst(alerts).value, [h.entry_id for h in alerts],
+            [h.entry_id for h in exclusions])
+
+
+@pytest.mark.parametrize("identity", DEMO_IDENTITIES, ids=lambda i: i.persona_id)
+def test_each_persona_meets_the_list_exactly_as_its_scenario_says(identity):
+    assert identity.persona_id in EXPECTED_SCREENING, (
+        f"{identity.persona_id} has no expected screening outcome; add one before using it")
+    assert _screen(identity) == EXPECTED_SCREENING[identity.persona_id]
+
+
+def test_the_namesake_is_excluded_on_date_of_birth_alone():
+    """Same name as SYN-0001, so the exclusion must come from the dates, not the spelling."""
+    from kyctools.data.sanctions import ALL_ENTRIES
+
+    volkov = next(i for i in DEMO_IDENTITIES if i.persona_id == "DEMO-US-04")
+    listed = next(e for e in ALL_ENTRIES if e.entry_id == "SYN-0001")
+    assert volkov.full_name.upper() == listed.name.upper()
+    assert volkov.dob != listed.dob
+
+
+def test_act3_list_update_confirms_nadia_and_no_one_else():
+    """Act 3 publishes the whole batch, `ACT3_BATCH`. Against the updated list, DEMO-US-03 is a
+    CONFIRMED match on SYN-0901 alone, and every other persona's screening is exactly what it was:
+    the other listings must not raise or exclude anyone."""
+    from kyctools.controls import parse_overlay
+    from kyctools.data.sanctions import ALL_ENTRIES
+
+    _, overlay = parse_overlay(json.dumps({"version": "ACT3", "entries": list(ACT3_BATCH)}))
+    assert [e.entry_id for e in overlay] == [e["entryId"] for e in ACT3_BATCH]
+    updated = ALL_ENTRIES + overlay
     for identity in DEMO_IDENTITIES:
-        assert identity.full_name.upper() not in screening, (
-            f"{identity.persona_id} ({identity.full_name}) collides with a sanctions/PEP seed; "
-            "a demo run would produce an unintended hit"
-        )
+        result = _screen(identity, updated)
+        if identity.persona_id == "DEMO-US-03":
+            assert result == ("CONFIRMED", ["SYN-0901"], [])
+        else:
+            assert result == EXPECTED_SCREENING[identity.persona_id], identity.persona_id
 
 
-def test_persona_ids_and_jurisdictions_are_unique():
+def test_act3_other_listings_name_no_persona():
+    """Screened against the other listings alone, no persona is raised or excluded: not even a
+    weak alert, which a reviewer on stage would have to explain."""
+    from kyctools.controls import parse_overlay
+
+    _, overlay = parse_overlay(json.dumps({"version": "ACT3",
+                                           "entries": list(ACT3_OTHER_LISTINGS)}))
+    for identity in DEMO_IDENTITIES:
+        assert _screen(identity, overlay) == ("NO_MATCH", [], []), identity.persona_id
+
+
+def test_act3_list_update_is_one_the_demo_route_accepts():
+    """The same validation `POST /demo/list-update` applies, so the panel's default publishes."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("demo_route", REPO / "api" / "demo.py")
+    sys.path.insert(0, str(REPO / "api"))
+    try:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(REPO / "api"))
+    assert module.validate_entries(list(ACT3_BATCH)) == [
+        {**entry, "programme": "SYN-UPDATE"} for entry in ACT3_BATCH]
+
+
+def test_the_demo_controls_publish_the_same_listings():
+    """The console's Demo controls publish Act 3's batch. If the named listing drifted, the act
+    would publish a list that names no one; if another drifted, it might name someone else."""
+    panel = (REPO / "frontend" / "apps" / "console" / "src" / "controls"
+             / "ControlsView.tsx").read_text()
+    block = re.search(r"const ACT3_ENTRY: ListEntry = \{(.*?)\};", panel, re.S)
+    assert block, "ACT3_ENTRY not found in ControlsView.tsx"
+    fields = dict(re.findall(r'(\w+): "([^"]*)"', block.group(1)))
+    assert fields == ACT3_LIST_UPDATE
+
+    others = re.search(r"const ACT3_OTHER_ENTRIES: ListEntry\[\] = \[(.*?)\];", panel, re.S)
+    assert others, "ACT3_OTHER_ENTRIES not found in ControlsView.tsx"
+    listed = [dict(re.findall(r'(\w+): "([^"]*)"', body))
+              for body in re.findall(r"\{(.*?)\}", others.group(1), re.S)]
+    assert listed == list(ACT3_OTHER_LISTINGS)
+
+
+def test_the_applicant_apps_personas_match_the_documents():
+    """The details form is pre-filled from `demoPersonas.ts`. A field that differs from the
+    document is a declared-vs-document mismatch on stage, which routes the case to a reviewer."""
+    source = (REPO / "frontend" / "apps" / "console" / "src" / "applicant"
+              / "demoPersonas.ts").read_text()
+    blocks = re.findall(r'id: "(DEMO-[A-Z]{2}-\d{2})",(.*?)\n  \}', source, re.S)
+    found = {pid: dict(re.findall(r'(\w+): "([^"]*)"', body)) for pid, body in blocks}
+    assert set(found) == {i.persona_id for i in DEMO_IDENTITIES}
+    for identity in DEMO_IDENTITIES:
+        persona = found[identity.persona_id]
+        assert persona["jurisdiction"] == identity.jurisdiction, identity.persona_id
+        assert persona["givenNames"] == identity.given_names, identity.persona_id
+        assert persona["surname"] == identity.surname, identity.persona_id
+        assert persona["dateOfBirth"] == identity.dob, identity.persona_id
+        assert persona["nationality"] == identity.mrz_country, identity.persona_id
+        assert persona["address"] == identity.address, identity.persona_id
+        assert persona["scenario"] == identity.scenario, identity.persona_id
+        # The file `write_all` produces for this persona, so the picker names the right upload.
+        assert persona["documentFile"] == (
+            f"{identity.persona_id.lower()}-{identity.document_type.lower()}.jpg")
+
+
+def test_persona_ids_are_unique_and_every_jurisdiction_has_one():
     ids = [i.persona_id for i in DEMO_IDENTITIES]
     assert len(ids) == len(set(ids))
-    jurisdictions = [i.jurisdiction for i in DEMO_IDENTITIES]
-    assert len(jurisdictions) == len(set(jurisdictions))
     # Matches IntakeStep.tsx's jurisdiction options exactly.
-    assert set(jurisdictions) == {"us", "uk", "au", "jp"}
+    assert {i.jurisdiction for i in DEMO_IDENTITIES} == {"us", "uk", "au", "jp"}
+    for identity in DEMO_IDENTITIES:
+        assert identity.persona_id.startswith(f"DEMO-{identity.jurisdiction.upper()}-")
+        assert identity.scenario, f"{identity.persona_id} has no scenario"
+
+
+def test_only_the_decided_jurisdiction_carries_screening_scenarios():
+    """Outside `DECIDED_JURISDICTIONS` every case goes to a reviewer for the jurisdiction alone,
+    so a screening scenario there would never reach the screening's own outcome on stage."""
+    sys.path.insert(0, str(REPO / "infra"))
+    try:
+        from kyc.config import DECIDED_JURISDICTIONS
+    finally:
+        sys.path.remove(str(REPO / "infra"))
+    for identity in DEMO_IDENTITIES:
+        if EXPECTED_SCREENING[identity.persona_id] != ("NO_MATCH", [], []):
+            assert identity.jurisdiction in DECIDED_JURISDICTIONS, identity.persona_id
+
+
+def test_document_numbers_are_unique():
+    numbers = [i.document_number for i in DEMO_IDENTITIES]
+    assert len(numbers) == len(set(numbers))
+
+
+def test_no_document_expires_before_the_talk_or_soon_after():
+    for identity in DEMO_IDENTITIES:
+        assert identity.expiry > "2027-12-31", identity.persona_id
+        assert identity.issued < "2026-12-01", identity.persona_id
 
 
 def test_document_numbers_fit_the_mrz_field():

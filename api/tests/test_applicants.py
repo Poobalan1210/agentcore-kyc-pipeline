@@ -207,8 +207,8 @@ class TestCreateApplicant:
         event = {
             "body": json.dumps({
                 "jurisdiction": "us", "applicantId": "APP-1",
-                "documents": [{"type": "PASSPORT", "key": "k", "bucket": "b",
-                              "issuingCountry": "US"}],
+                "documents": [{"type": "PASSPORT", "key": "APP-1/PASSPORT-abc",
+                              "bucket": "kyc90-evidence-us", "issuingCountry": "US"}],
             }),
         }
         resp = applicants.create_applicant(event)
@@ -234,7 +234,8 @@ class TestCreateApplicant:
                 "dateOfBirth": "1991-05-14", "nationality": "USA",
                 "address": "482 Kestrel Way, Austin, TX 78701, USA",
             },
-            "documents": [{"type": "PASSPORT", "key": "k", "bucket": "b"}]})}
+            "documents": [{"type": "PASSPORT", "key": "APP-1/PASSPORT-abc",
+                           "bucket": "kyc90-evidence-us"}]})}
         applicants.create_applicant(event)
 
         call = fake_ddb.update_calls[0]
@@ -286,7 +287,8 @@ class TestCreateApplicant:
         event = {
             "body": json.dumps({
                 "jurisdiction": "us", "applicantId": "SPOOFED",
-                "documents": [{"type": "PASSPORT", "key": "k", "bucket": "b"}],
+                "documents": [{"type": "PASSPORT", "key": "APP-real-user/PASSPORT-abc",
+                               "bucket": "kyc90-evidence-us"}],
             }),
             "requestContext": {"authorizer": {"jwt": {"claims": {"sub": "real-user"}}}},
         }
@@ -306,7 +308,8 @@ class TestCreateApplicant:
             "body": json.dumps({
                 "jurisdiction": "us", "applicationId": "run-002",
                 "applicantId": "APP-someone-else",
-                "documents": [{"type": "PASSPORT", "key": "k", "bucket": "b"}],
+                "documents": [{"type": "PASSPORT", "key": "APP-real-user-run-002/PASSPORT-abc",
+                               "bucket": "kyc90-evidence-us"}],
             }),
             "requestContext": {"authorizer": {"jwt": {"claims": {"sub": "real-user"}}}},
         }
@@ -363,7 +366,8 @@ class TestCreateApplicant:
             FakeBoto3Module(sqs=FakeSqs(), ddb=fake_ddb))
         event = {"body": json.dumps({
             "jurisdiction": "us", "applicantId": "APP-1",
-            "documents": [{"type": "PASSPORT", "key": "k", "bucket": "b"}]})}
+            "documents": [{"type": "PASSPORT", "key": "APP-1/PASSPORT-abc",
+                           "bucket": "kyc90-evidence-us"}]})}
         applicants.create_applicant(event)
 
         assert not fake_ddb.put_calls, "a put_item would clobber pre-existing liveness evidence"
@@ -372,36 +376,237 @@ class TestCreateApplicant:
         assert call["ConditionExpression"] == "attribute_not_exists(caseId)"
         # The update must not touch `liveness`: it is written by the liveness endpoint only.
         assert "liveness" not in call["UpdateExpression"]
-        for field in ("caseId", "#state", "jurisdiction", "documents", "gatewayArn"):
+        for field in ("caseId", "#state", "jurisdiction", "documents", "transitions"):
             assert field in call["UpdateExpression"], f"{field} missing from the update"
+        # The Gateway and policy-engine pins come from the deployed stack, not from a string
+        # fabricated at intake (`app.py` audit_pins).
+        for fabricated in ("gatewayArn", "policyEngineVersion"):
+            assert fabricated not in call["UpdateExpression"]
+
+
+class StatefulDynamo:
+    """One case item in wire format, honouring the two intake conditions: a case is created once
+    (`attribute_not_exists(caseId)`), and a continuation needs the state it read."""
+
+    def __init__(self, item=None):
+        self.item = item
+        self.update_calls: list[dict[str, Any]] = []
+
+    def get_item(self, **kwargs):
+        return {"Item": json.loads(json.dumps(self.item))} if self.item else {}
+
+    def update_item(self, **kwargs):
+        self.update_calls.append(kwargs)
+        condition = kwargs.get("ConditionExpression")
+        values = kwargs["ExpressionAttributeValues"]
+        if condition == "attribute_not_exists(caseId)" and self.item and "caseId" in self.item:
+            raise AwsError("ConditionalCheckFailedException")
+        if condition == "#state = :awaiting":
+            if (self.item or {}).get("state") != values[":awaiting"]:
+                raise AwsError("ConditionalCheckFailedException")
+        item = self.item or {}
+        for name in ("caseId", "documents", "declaredIdentity", "lastEventId"):
+            placeholder = {"caseId": ":caseId", "documents": ":documents",
+                           "declaredIdentity": ":declaredIdentity",
+                           "lastEventId": ":eventId"}[name]
+            if placeholder in values:
+                item[name] = values[placeholder]
+        if ":state" in values:
+            item["state"] = values[":state"]
+        if ":received" in values:
+            item["state"] = values[":received"]
+            item.setdefault("phase1History", {"L": []})["L"].extend(values[":previous"]["L"])
+            for removed in ("phase1", "phase1Review"):
+                item.pop(removed, None)
+        self.item = item
+        return {}
+
+
+SUB = "user-1"
+APPLICANT = f"APP-{SUB}-run-1"
+CLAIMS = {"requestContext": {"authorizer": {"jwt": {"claims": {"sub": SUB}}}}}
+
+
+def submission(**over):
+    body = {"jurisdiction": "us", "applicationId": "run-1",
+            "documents": [{"type": "PASSPORT", "key": f"{APPLICANT}/PASSPORT-abc",
+                           "bucket": "kyc90-evidence-us", "issuingCountry": "US"}]}
+    body.update(over)
+    return {"body": json.dumps(body), **CLAIMS}
+
+
+class TestDocumentOwnership:
+    """The tools read whatever the case lists, so a case must list only this applicant's own
+    uploads — otherwise an applicant could be screened against someone else's passport."""
+
+    @pytest.mark.parametrize("document", [
+        {"type": "PASSPORT", "key": "APP-someone-else/PASSPORT-abc",
+         "bucket": "kyc90-evidence-us"},
+        {"type": "PASSPORT", "key": f"{APPLICANT}/PASSPORT-abc", "bucket": "another-bucket"},
+        {"type": "PASSPORT", "key": f"{APPLICANT}-evil/PASSPORT-abc",
+         "bucket": "kyc90-evidence-us"},
+    ])
+    def test_another_applicants_document_is_refused(self, env, monkeypatch, document):
+        fake_ddb = StatefulDynamo()
+        monkeypatch.setitem(__import__("sys").modules, "boto3",
+                            FakeBoto3Module(sqs=FakeSqs(), ddb=fake_ddb))
+        resp = applicants.create_applicant(submission(documents=[document]))
+        assert resp["statusCode"] == 403
+        assert json.loads(resp["body"])["error"] == "DOCUMENT_NOT_OWNED"
+        assert not fake_ddb.update_calls
+
+    def test_too_many_documents_is_a_400(self, env, monkeypatch):
+        doc = {"type": "PASSPORT", "key": f"{APPLICANT}/x", "bucket": "kyc90-evidence-us"}
+        monkeypatch.setitem(__import__("sys").modules, "boto3",
+                            FakeBoto3Module(sqs=FakeSqs(), ddb=StatefulDynamo()))
+        assert applicants.create_applicant(submission(documents=[doc] * 4))["statusCode"] == 400
+
+    def test_the_document_type_cannot_steer_the_upload_key(self, env, monkeypatch):
+        """Uploads share a bucket with the decision records at `{applicantId}/{phase}/`. A type
+        of `phase1/x` would otherwise place an upload among them."""
+        fake_s3 = FakeS3()
+        monkeypatch.setitem(__import__("sys").modules, "boto3", FakeBoto3Module(s3=fake_s3))
+        event = {"body": json.dumps({"jurisdiction": "us", "documentType": "phase1/../x.json",
+                                     "contentType": "image/jpeg", "applicantId": "APP-1",
+                                     "checksumSha256": CHECKSUM})}
+        applicants.presign_document(event)
+        key = fake_s3.presign_calls[0]["Params"]["Key"]
+        assert key.startswith("APP-1/phase1x") and key.count("/") == 1
+
+
+class TestContinuation:
+    """Resubmission after a step-up: the previous attempt is kept, and Phase 1 runs again."""
+
+    def _awaiting(self):
+        return {"applicantId": {"S": APPLICANT}, "caseId": {"S": f"CASE-{APPLICANT}"},
+                "state": {"S": "AWAITING_APPLICANT"},
+                "phase1": {"S": json.dumps({"outcome": "STEP_UP",
+                                            "reasonCode": "NO_FACE_ON_DOCUMENT"})},
+                "phase1Review": {"M": {"action": {"S": "REQUEST_STEP_UP"}}},
+                "lastEventId": {"S": "EVT-OLD"}}
+
+    def test_a_continuation_reopens_the_case_and_enqueues_a_new_event(self, env, monkeypatch):
+        fake_sqs = FakeSqs()
+        fake_ddb = StatefulDynamo(self._awaiting())
+        monkeypatch.setitem(__import__("sys").modules, "boto3",
+                            FakeBoto3Module(sqs=fake_sqs, ddb=fake_ddb))
+        resp = applicants.create_applicant(submission())
+        assert resp["statusCode"] == 202
+        event_id = json.loads(resp["body"])["eventId"]
+        assert event_id != "EVT-OLD"
+        assert json.loads(fake_sqs.sent[0]["MessageBody"])["eventId"] == event_id
+        assert fake_ddb.item["state"] == {"S": "RECEIVED"}
+        assert "phase1" not in fake_ddb.item and "phase1Review" not in fake_ddb.item
+        history = fake_ddb.item["phase1History"]["L"][0]["M"]
+        assert json.loads(history["phase1"]["S"])["reasonCode"] == "NO_FACE_ON_DOCUMENT"
+        assert history["eventId"] == {"S": "EVT-OLD"}
+
+    def test_the_continuation_write_is_conditional_on_the_state_it_read(self, env, monkeypatch):
+        """Two resubmissions racing each other must not both enqueue."""
+        fake_ddb = StatefulDynamo(self._awaiting())
+        monkeypatch.setitem(__import__("sys").modules, "boto3",
+                            FakeBoto3Module(sqs=FakeSqs(), ddb=fake_ddb))
+        applicants.create_applicant(submission())
+        continuation = fake_ddb.update_calls[-1]
+        assert continuation["ConditionExpression"] == "#state = :awaiting"
+        assert "REMOVE phase1, phase1Review" in continuation["UpdateExpression"]
+
+    @pytest.mark.parametrize("state", ["RECEIVED", "IN_PROGRESS", "AWAITING_REVIEW",
+                                       "PROVISIONAL", "MONITORING", "DECIDED", "FROZEN"])
+    def test_any_other_state_is_a_409_and_enqueues_nothing(self, env, monkeypatch, state):
+        item = self._awaiting()
+        item["state"] = {"S": state}
+        fake_sqs = FakeSqs()
+        monkeypatch.setitem(__import__("sys").modules, "boto3",
+                            FakeBoto3Module(sqs=fake_sqs, ddb=StatefulDynamo(item)))
+        resp = applicants.create_applicant(submission())
+        assert resp["statusCode"] == 409
+        assert json.loads(resp["body"])["state"] == state
+        assert not fake_sqs.sent
+
+    def test_the_message_is_deduplicated_on_the_event(self, env, monkeypatch):
+        fake_sqs = FakeSqs()
+        monkeypatch.setitem(__import__("sys").modules, "boto3",
+                            FakeBoto3Module(sqs=fake_sqs, ddb=StatefulDynamo()))
+        body = json.loads(applicants.create_applicant(submission())["body"])
+        assert fake_sqs.sent[0]["MessageDeduplicationId"] == body["eventId"]
 
 
 class TestGetCase:
+    def _get(self, monkeypatch, item, claims=CLAIMS, applicant=APPLICANT):
+        monkeypatch.setitem(__import__("sys").modules, "boto3",
+                            FakeBoto3Module(ddb=StatefulDynamo(item)))
+        return applicants.get_case({"pathParameters": {"applicantId": applicant}, **claims})
+
     def test_projects_only_applicant_facing_fields(self, env, monkeypatch):
         item = {
             "state": {"S": "PROVISIONAL"},
             "phase1": {"S": json.dumps({
-                "outcome": "PROVISIONAL_APPROVE_RESTRICTED", "reasonCode": None,
-                "requiredItem": None})},
+                "outcome": "PROVISIONAL_APPROVE_RESTRICTED", "tier": "LOW",
+                "factsRead": {"screening": {}}})},
+            "phase1Evidence": {"S": "[]"},
+            "factScreening": {"S": "{}"},
             "ingressLatencyMs": {"N": "842.5"},
         }
-        fake_ddb = FakeDynamo(item=item)
-        monkeypatch.setitem(
-            __import__("sys").modules, "boto3", FakeBoto3Module(ddb=fake_ddb))
-        event = {"pathParameters": {"applicantId": "APP-1"}}
-        resp = applicants.get_case(event)
+        resp = self._get(monkeypatch, item)
         body = json.loads(resp["body"])
         assert resp["statusCode"] == 200
         assert body["state"] == "PROVISIONAL"
-        assert body["outcome"] == "PROVISIONAL_APPROVE_RESTRICTED"
+        assert body["status"] == "OPEN_WITH_LIMITS"
         assert body["ingressLatencyMs"] == 842.5
-        # The raw agent evidence blob must never reach the applicant.
-        assert "phase1Evidence" not in body
+        rendered = json.dumps(body)
+        for internal in ("phase1Evidence", "factScreening", "tier", "factsRead", "LOW"):
+            assert internal not in rendered, internal
+
+    def test_another_applicants_case_is_a_404_not_a_403(self, env, monkeypatch):
+        """The route must not reveal which applicant ids exist."""
+        resp = self._get(monkeypatch, {"state": {"S": "PROVISIONAL"}},
+                         applicant="APP-someone-else-run-1")
+        assert resp["statusCode"] == 404
+
+    def test_an_unauthenticated_read_is_a_404(self, env, monkeypatch):
+        resp = self._get(monkeypatch, {"state": {"S": "PROVISIONAL"}}, claims={})
+        assert resp["statusCode"] == 404
+
+    def test_a_reviewer_or_presenter_may_read_any_case(self, env, monkeypatch):
+        for group in ("reviewers", "presenters"):
+            claims = {"requestContext": {"authorizer": {"jwt": {"claims": {
+                "sub": "staff-1", "cognito:groups": f"[{group}]"}}}}}
+            assert self._get(monkeypatch, {"state": {"S": "MONITORING"}},
+                             claims=claims)["statusCode"] == 200
+
+    def test_a_rejection_never_says_why(self, env, monkeypatch):
+        """Telling an applicant they matched a sanctions list can itself be an offence."""
+        item = {"state": {"S": "DECIDED"},
+                "phase1": {"S": json.dumps({"outcome": "REJECT",
+                                            "reasonCode": "SCREENING_CONFIRMED_MATCH"})}}
+        body = json.loads(self._get(monkeypatch, item)["body"])
+        assert body["status"] == "DECLINED"
+        assert "SCREENING" not in json.dumps(body)
+
+    def test_a_step_up_says_what_to_fix(self, env, monkeypatch):
+        item = {"state": {"S": "AWAITING_APPLICANT"},
+                "phase1": {"S": json.dumps({
+                    "outcome": "STEP_UP", "reasonCode": "NO_FACE_ON_DOCUMENT",
+                    "requiredItem": "A clear photo of the identity document's photo page"})}}
+        body = json.loads(self._get(monkeypatch, item)["body"])
+        assert body["canContinue"] is True
+        assert body["reasonCode"] == "NO_FACE_ON_DOCUMENT"
+        assert body["requiredItem"].startswith("A clear photo")
+
+    def test_messages_pass_through_the_tipping_off_guard(self, env, monkeypatch):
+        item = {"state": {"S": "PROVISIONAL"}, "notifications": {"L": [
+            {"M": {"kind": {"S": "ACCOUNT_OPENED_WITH_LIMITS"},
+                   "text": {"S": "Your account is limited pending sanctions screening."},
+                   "accountState": {"S": "OPEN_RESTRICTED"}, "at": {"S": "t1"}}},
+            {"M": {"kind": {"S": "ACCOUNT_UPDATED"},
+                   "text": {"S": "Good news: your account is fully open."},
+                   "accountState": {"S": "OPEN_STANDARD"}, "at": {"S": "t2"}}},
+        ]}}
+        body = json.loads(self._get(monkeypatch, item)["body"])
+        texts = [n["text"] for n in body["notifications"]]
+        assert "sanction" not in texts[0].lower()
+        assert texts[1] == "Good news: your account is fully open."
 
     def test_case_not_found_is_a_404(self, env, monkeypatch):
-        fake_ddb = FakeDynamo(item=None)
-        monkeypatch.setitem(
-            __import__("sys").modules, "boto3", FakeBoto3Module(ddb=fake_ddb))
-        event = {"pathParameters": {"applicantId": "APP-404"}}
-        resp = applicants.get_case(event)
-        assert resp["statusCode"] == 404
+        assert self._get(monkeypatch, None)["statusCode"] == 404

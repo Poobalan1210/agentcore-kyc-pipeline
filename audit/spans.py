@@ -413,12 +413,19 @@ def _maybe_json(value: Any) -> Any:
         return value
 
 
-#: Case-record attributes that hold the recorded *result* of a Gateway tool call. Each one exists
-#: only because a tool ran and its output was persisted, so each is first-hand evidence of a
-#: TOOL_CALL — the same fact an OTEL span would have carried, recorded by the orchestrator instead
-#: of scraped back out of a log group.
+#: Case-record attributes that hold the recorded *result* of a Gateway tool call. Each exists only
+#: because a tool ran and recorded what it found, so each is first-hand evidence of a TOOL_CALL —
+#: the same fact an OTEL span would have carried, and the same fact the rules decided on. Named by
+#: the Gateway action (`Target___tool`) so the record matches what Cedar authorised.
 _TOOL_RESULT_ATTRIBUTES = (
     ("documentExtraction", "DocumentStore___s3_get_document"),
+    ("factFaceMatch", "FaceCompare___rekognition_compare_faces"),
+    ("factVelocity", "VelocityStore___velocity_check"),
+    ("factScreening", "SanctionsScreen___sanctions_screen"),
+    ("factPep", "PepList___pep_lookup"),
+    ("factAdverseMedia", "AdverseMedia___adverse_media"),
+    # Written only while the output contracts were deployed. Still read, so a record rebuilt for a
+    # case decided then carries them.
     ("findingDocuments", "submit_document_findings"),
     ("findingIdentity", "submit_identity_findings"),
     ("findingPrescreen", "submit_prescreen_findings"),
@@ -464,8 +471,8 @@ def evidence_from_case_record(
 
     * AGENT_RUN  <- `phase1Evidence` / `phase2Evidence`, one entry per harness invocation, in the
       order the Parallel state recorded them.
-    * TOOL_CALL  <- the persisted *results* of Gateway tool calls (`documentExtraction`, the
-      `submit_*` findings). Each is present only because the tool ran.
+    * TOOL_CALL  <- the facts the evidence tools recorded (`documentExtraction`, `factScreening`
+      and the rest). Each is present only because the tool ran.
     * DECISION   <- the decision the engine returned for this record.
 
     This is first-hand rather than reconstructed: it is written synchronously by the component that

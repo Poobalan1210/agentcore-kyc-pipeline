@@ -51,3 +51,5 @@ demo-assets/photos/*.png
 
 # --- logs / scratch -----------------------------------------------------------
 *.log
+# --- execution exports (scripts/export_executions.py): real case ids, account-specific ----------
+exports/

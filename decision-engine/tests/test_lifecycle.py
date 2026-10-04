@@ -22,11 +22,13 @@ from lifecycle import (
     risk_increased,
 )
 from models import (
+    MatchStrength,
     PepStatus,
     Phase3Outcome,
     RiskEvent,
     RiskEventSeverity,
     RiskTier,
+    ScreeningHit,
 )
 
 DECIDED_AT = "2026-09-16T10:04:00Z"
@@ -63,14 +65,26 @@ class TestDayZeroIsNeverRewritten:
                      new_evidence=full(), decided_at=DECIDED_AT)
         assert d.version == 5
 
-    def test_history_keys_sort_in_decision_order(self):
-        """Lexicographic sort keys must not put version 10 before version 2."""
-        keys = [history_sort_key(DECIDED_AT, v) for v in (1, 2, 9, 10, 11)]
+    def test_history_keys_sort_in_event_order(self):
+        times = ["2026-09-16T09:59:00Z", "2026-10-02T11:00:00Z", "2026-12-02T18:04:05Z"]
+        keys = [history_sort_key(t, "EVT-1") for t in times]
         assert keys == sorted(keys)
 
-    def test_history_key_rejects_a_zero_or_negative_version(self):
+    def test_a_replayed_event_computes_the_same_key(self):
+        """The key comes from the event, not from the run that processed it, so a second delivery
+        lands on the same row and the conditional write refuses it."""
+        assert history_sort_key("2026-12-02T18:04:05Z", "EVT-77") == \
+            history_sort_key("2026-12-02T18:04:05Z", "EVT-77")
+
+    def test_two_events_at_the_same_instant_stay_distinct(self):
+        assert history_sort_key("2026-12-02T18:04:05Z", "EVT-77") != \
+            history_sort_key("2026-12-02T18:04:05Z", "EVT-78")
+
+    def test_history_key_needs_both_parts(self):
         with pytest.raises(ValueError):
-            history_sort_key(DECIDED_AT, 0)
+            history_sort_key("", "EVT-1")
+        with pytest.raises(ValueError):
+            history_sort_key("2026-12-02T18:04:05Z", "")
 
 
 class TestFailClosed:
@@ -118,8 +132,49 @@ class TestRiskMovement:
     def test_rising_to_high_escalates_rather_than_auto_restricting(self):
         d = reassess(day0=day0(tier=RiskTier.LOW), event=event(),
                      new_evidence=full(pep_status=PepStatus.SELF), decided_at=DECIDED_AT)
-        if d.new_tier in (RiskTier.HIGH, RiskTier.PROHIBITED):
-            assert d.outcome is Phase3Outcome.RISK_INCREASED_REVIEW
+        assert d.new_tier is RiskTier.HIGH
+        assert d.outcome is Phase3Outcome.RISK_INCREASED_REVIEW
+
+    def test_a_confirmed_rescreen_hit_freezes_whatever_the_event_severity(self):
+        """The Act 3 path: a list update names an approved customer. Freeze first, then a human
+        confirms — a sanctioned person must not be able to move money while the review waits."""
+        d = reassess(day0=day0(tier=RiskTier.LOW),
+                     event=event(event_type="SANCTIONS_LIST_UPDATE",
+                                 severity=RiskEventSeverity.HIGH),
+                     new_evidence=full(screening_hits=(
+                         ScreeningHit(list_id="SYN-0901", strength=MatchStrength.CONFIRMED),)),
+                     decided_at=DECIDED_AT)
+        assert d.outcome is Phase3Outcome.FREEZE
+        assert d.new_tier is RiskTier.PROHIBITED
+        assert d.day0_tier is RiskTier.LOW
+
+    def test_a_possible_rescreen_hit_goes_to_review_without_freezing(self):
+        d = reassess(day0=day0(tier=RiskTier.LOW),
+                     event=event(event_type="SANCTIONS_LIST_UPDATE"),
+                     new_evidence=full(screening_hits=(
+                         ScreeningHit(list_id="SYN-0902", strength=MatchStrength.POSSIBLE),)),
+                     decided_at=DECIDED_AT)
+        assert d.outcome is Phase3Outcome.RISK_INCREASED_REVIEW
+
+    @pytest.mark.parametrize("strength", [MatchStrength.POSSIBLE, MatchStrength.PROBABLE])
+    def test_a_new_alert_on_a_high_risk_customer_is_not_risk_unchanged(self, strength):
+        """A customer approved at HIGH (a PEP under enhanced due diligence) is still HIGH after a
+        partial match on a new listing. Comparing tiers alone logged that as "risk unchanged" and
+        no person ever saw the alert."""
+        d = reassess(day0=day0(tier=RiskTier.HIGH),
+                     event=event(event_type="SANCTIONS_LIST_UPDATE"),
+                     new_evidence=full(pep_status=PepStatus.SELF, screening_hits=(
+                         ScreeningHit(list_id="SYN-0903", strength=strength),)),
+                     decided_at=DECIDED_AT)
+        assert d.new_tier is RiskTier.HIGH
+        assert d.outcome is Phase3Outcome.RISK_INCREASED_REVIEW
+        assert "SYN-0903" in d.rationale
+
+    def test_a_high_risk_customer_with_no_alert_is_unchanged(self):
+        """The rule is about alerts, not about HIGH: without one, HIGH staying HIGH is no news."""
+        d = reassess(day0=day0(tier=RiskTier.HIGH), event=event(),
+                     new_evidence=full(pep_status=PepStatus.SELF), decided_at=DECIDED_AT)
+        assert d.outcome is Phase3Outcome.RISK_UNCHANGED
 
 
 class TestReviewCadence:

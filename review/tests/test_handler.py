@@ -399,3 +399,50 @@ def build_decision_for(reviewer_id: str, *, submission_id: str = "req-1"):
     from conftest import submission as make_submission
 
     return build_decision(make_submission(reviewer_id=reviewer_id, submission_id=submission_id))
+
+
+class TestLaterPhasesEndToEnd:
+    """Through the stateful fake, with the phase record stored the way `asl.py` stores it: a JSON
+    string written by the state machine before it queued the review."""
+
+    SCREENING = json.dumps({"listVersion": "SYNTHETIC-2026-10-01",
+                            "hits": [{"entryId": "SYN-0106", "classification": "POSSIBLE"}]})
+
+    def test_a_phase2_approval_lands_in_monitoring_and_clears_the_alert(self, sfn):
+        item = case_record(phase="phase2")
+        item["phase2"] = json.dumps({"tier": "HIGH", "outcome": "MANUAL_REVIEW"})
+        item["factScreening"] = self.SCREENING
+        dynamo = FakeDynamo(item)
+
+        response = run(api_event(phase="phase2"), dynamo=dynamo, sfn=sfn)
+
+        assert response["statusCode"] == 200
+        assert dynamo.item["state"] == "MONITORING"
+        stored = json.loads(dynamo.item["screeningDispositions"])
+        assert [d["entryId"] for d in stored] == ["SYN-0106"]
+        resumed = json.loads(sfn.successes[0]["output"])["reviewOutcome"]
+        assert resumed["clearedAlerts"] == ["SYN-0106"]
+        assert resumed["targetState"] == "MONITORING"
+
+    def test_a_prohibited_reassessment_cannot_be_cleared(self, sfn):
+        """A confirmed match found by a list update is not a reviewer's to overturn."""
+        item = case_record(phase="phase3")
+        item["phase3"] = json.dumps({"tier": "PROHIBITED", "outcome": "MANUAL_REVIEW",
+                                     "engineOutcome": "FREEZE"})
+        dynamo = FakeDynamo(item)
+
+        response = run(api_event(phase="phase3"), dynamo=dynamo, sfn=sfn)
+
+        assert response["statusCode"] == 422
+        assert "PROHIBITED_TIER_NOT_OVERRIDABLE" in body_of(response)["reasons"]
+        assert dynamo.item["state"] == "AWAITING_REVIEW"
+        assert not sfn.successes and not sfn.failures
+
+    def test_a_phase3_clearance_restores_what_phase2_granted(self, sfn):
+        item = case_record(phase="phase3")
+        item["phase3"] = json.dumps({"tier": "HIGH", "outcome": "MANUAL_REVIEW"})
+        item["phase2"] = json.dumps({"outcome": "FULL_APPROVE_STANDARD"})
+        dynamo = FakeDynamo(item)
+
+        assert run(api_event(phase="phase3"), dynamo=dynamo, sfn=sfn)["statusCode"] == 200
+        assert dynamo.item["state"] == "MONITORING"

@@ -155,13 +155,18 @@ class VelocitySignals:
 
 @dataclass(frozen=True, kw_only=True)
 class PreliminaryInputs:
-    """design §8.1. Every field is read by a rule — see the note in §8.2 about why that matters."""
+    """design §8.1. Every field is read by a rule — see the note in §8.2 about why that matters.
+
+    `screening_hits` joined Phase 1 when variant screening moved there: the account opens at the
+    end of this phase, and a PROBABLE or POSSIBLE alert must reach a human before it does.
+    """
 
     jurisdiction_risk: RiskTier
     pre_screen_matched: bool
     document_confidence: float
     velocity_signals: VelocitySignals
     product_applied: str
+    screening_hits: tuple[ScreeningHit, ...] = ()
 
 
 @dataclass(frozen=True, kw_only=True)

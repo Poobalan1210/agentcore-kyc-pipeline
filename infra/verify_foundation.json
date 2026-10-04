@@ -5,19 +5,19 @@
     "detail": "Enabled"
   },
   {
-    "check": "us: COMPLIANCE mode",
+    "check": "us: GOVERNANCE mode (DEMO)",
     "pass": true,
-    "detail": "COMPLIANCE"
+    "detail": "GOVERNANCE"
   },
   {
-    "check": "us: 7-year retention",
+    "check": "us: 1-day default retention",
     "pass": true,
-    "detail": "2555 days"
+    "detail": "1 days"
   },
   {
     "check": "us: probe object written",
     "pass": true,
-    "detail": "version FXkhiH97L4P1"
+    "detail": "version valuXF3tELpN"
   },
   {
     "check": "us: DELETE of locked version is refused",
@@ -25,9 +25,9 @@
     "detail": "AccessDenied"
   },
   {
-    "check": "us: delete marker allowed (object still retained)",
+    "check": "us: admin can remove it with the governance bypass",
     "pass": true,
-    "detail": "expected \u2014 versioned delete marker, not a deletion"
+    "detail": "probe deleted"
   },
   {
     "check": "uk: Object Lock enabled",
@@ -35,19 +35,19 @@
     "detail": "Enabled"
   },
   {
-    "check": "uk: COMPLIANCE mode",
+    "check": "uk: GOVERNANCE mode (DEMO)",
     "pass": true,
-    "detail": "COMPLIANCE"
+    "detail": "GOVERNANCE"
   },
   {
-    "check": "uk: 7-year retention",
+    "check": "uk: 1-day default retention",
     "pass": true,
-    "detail": "2555 days"
+    "detail": "1 days"
   },
   {
     "check": "uk: probe object written",
     "pass": true,
-    "detail": "version FgPlN6bxiKiQ"
+    "detail": "version oo_VSyw4hj66"
   },
   {
     "check": "uk: DELETE of locked version is refused",
@@ -55,9 +55,9 @@
     "detail": "AccessDenied"
   },
   {
-    "check": "uk: delete marker allowed (object still retained)",
+    "check": "uk: admin can remove it with the governance bypass",
     "pass": true,
-    "detail": "expected \u2014 versioned delete marker, not a deletion"
+    "detail": "probe deleted"
   },
   {
     "check": "au: Object Lock enabled",
@@ -65,19 +65,19 @@
     "detail": "Enabled"
   },
   {
-    "check": "au: COMPLIANCE mode",
+    "check": "au: GOVERNANCE mode (DEMO)",
     "pass": true,
-    "detail": "COMPLIANCE"
+    "detail": "GOVERNANCE"
   },
   {
-    "check": "au: 7-year retention",
+    "check": "au: 1-day default retention",
     "pass": true,
-    "detail": "2555 days"
+    "detail": "1 days"
   },
   {
     "check": "au: probe object written",
     "pass": true,
-    "detail": "version Czv67ObhjdIo"
+    "detail": "version HJwt7FQ97Dk1"
   },
   {
     "check": "au: DELETE of locked version is refused",
@@ -85,9 +85,9 @@
     "detail": "AccessDenied"
   },
   {
-    "check": "au: delete marker allowed (object still retained)",
+    "check": "au: admin can remove it with the governance bypass",
     "pass": true,
-    "detail": "expected \u2014 versioned delete marker, not a deletion"
+    "detail": "probe deleted"
   },
   {
     "check": "jp: Object Lock enabled",
@@ -95,19 +95,19 @@
     "detail": "Enabled"
   },
   {
-    "check": "jp: COMPLIANCE mode",
+    "check": "jp: GOVERNANCE mode (DEMO)",
     "pass": true,
-    "detail": "COMPLIANCE"
+    "detail": "GOVERNANCE"
   },
   {
-    "check": "jp: 7-year retention",
+    "check": "jp: 1-day default retention",
     "pass": true,
-    "detail": "2555 days"
+    "detail": "1 days"
   },
   {
     "check": "jp: probe object written",
     "pass": true,
-    "detail": "version 8vlbKP0iwPSz"
+    "detail": "version 5gPmeesPk0yy"
   },
   {
     "check": "jp: DELETE of locked version is refused",
@@ -115,9 +115,9 @@
     "detail": "AccessDenied"
   },
   {
-    "check": "jp: delete marker allowed (object still retained)",
+    "check": "jp: admin can remove it with the governance bypass",
     "pass": true,
-    "detail": "expected \u2014 versioned delete marker, not a deletion"
+    "detail": "probe deleted"
   },
   {
     "check": "biometric bucket has NO Object Lock",
@@ -135,17 +135,17 @@
     "detail": "delete succeeded"
   },
   {
-    "check": "kyc90-harness-router: denies InvokeAgentRuntimeCommand",
+    "check": "kyc90-harness-briefing: denies InvokeAgentRuntimeCommand",
     "pass": true,
     "detail": "explicit Deny present"
   },
   {
-    "check": "kyc90-harness-router: denies sts:AssumeRole",
+    "check": "kyc90-harness-briefing: denies sts:AssumeRole",
     "pass": true,
     "detail": "R23.6"
   },
   {
-    "check": "kyc90-harness-router: model access is scoped, not '*'",
+    "check": "kyc90-harness-briefing: model access is scoped, not '*'",
     "pass": true,
     "detail": ""
   },
@@ -262,7 +262,7 @@
   {
     "check": "both GSIs present",
     "pass": true,
-    "detail": "{'phase2Pending-index', 'state-index'}"
+    "detail": "{'state-index', 'phase2Pending-index'}"
   },
   {
     "check": "SSE with customer-managed key",

@@ -139,7 +139,7 @@ def test_retention_and_encryption_target_the_same_log_group_per_agent(harnesses_
     retention = _calls(harnesses_template, "PutRetentionPolicy")
     encryption = _calls(harnesses_template, "AssociateKmsKey")
     assert retention and encryption
-    for suffix in ("Router", "Documents", "Identity", "Fraud", "PreScreen",
+    for suffix in ("Briefing", "Documents", "Identity", "Fraud", "PreScreen",
                    "ComplianceRisk", "Notify"):
         r = next((v for k, v in retention.items() if f"TraceRetention{suffix}" in k), None)
         e = next((v for k, v in encryption.items() if f"TraceEncryption{suffix}" in k), None)

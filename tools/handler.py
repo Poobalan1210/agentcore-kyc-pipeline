@@ -1,11 +1,11 @@
-"""Single Lambda, seven tools, name-based dispatch — task 2.1.
+"""Single Lambda, six evidence tools, name-based dispatch — task 2.1.
 
 Ported from P-10, which runs 17 tools this way behind a Gateway with SigV4. One function to
 operate and one place for logging, retries and redaction; the Gateway is what makes them look
 like separate tools to the agent, and Cedar is what authorises them individually.
 
-Why one function rather than seven: seven functions means seven cold-start profiles, seven
-provisioned-concurrency budgets and seven places for the redaction logic to drift. The
+Why one function rather than six: six functions means six cold-start profiles, six
+provisioned-concurrency budgets and six places for the redaction logic to drift. The
 counter-argument is blast radius, and that is answered at the Gateway and Cedar layer where
 authorisation happens per tool anyway (R14.2).
 
@@ -134,19 +134,21 @@ def handler(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
 
 
 # Local smoke run: python handler.py
+#
+# Every evidence tool reads the case record, so the smoke run exercises the pure matcher directly.
 if __name__ == "__main__":
     import pprint
 
-    for name, payload in (
-        ("sanctions_exact_match", {"name": "Dmitri Volkov", "dob": "1968-04-12",
-                                   "country": "RU"}),
-        ("sanctions_exact_match", {"name": "Dmitri Volkov", "dob": "1994-10-05",
-                                   "country": "UA"}),
-        ("sanctions_fuzzy", {"name": "Mohammed Al-Rashid", "dob": "1979-03-11",
-                             "country": "SY"}),
-        ("pep_lookup", {"name": "Adaeze Adeyemi", "dob": "1990-07-22", "country": "NG"}),
-        ("adverse_media", {"name": "Kwame Asante-Boateng", "dob": "1982-06-25",
-                           "country": "GH"}),
+    from kyctools.data.sanctions import ALL_ENTRIES
+    from kyctools.matching import Candidate, screen
+
+    for name, dob, country in (
+        ("Dmitri Volkov", "1968-04-12", "RU"),
+        ("Dmitri Volkov", "1994-10-05", "UA"),
+        ("Mohammed Al-Rashid", "1979-03-11", "SY"),
+        ("Avery Quinn Hale", "1990-11-06", "US"),
     ):
-        print("\n=== %s : %s" % (name, payload.get("name")))
-        pprint.pp(handler({"toolName": name, "arguments": payload}))
+        alerts, exclusions = screen(Candidate(name=name, dob=dob, country=country), ALL_ENTRIES)
+        print("\n=== %s (%s)" % (name, dob))
+        pprint.pp({"alerts": [h.to_dict() for h in alerts],
+                   "excluded": [h.to_dict() for h in exclusions]})

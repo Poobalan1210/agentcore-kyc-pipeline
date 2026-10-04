@@ -49,6 +49,14 @@ LIVENESS_REGION_BY_JURISDICTION: dict[str, str] = {
 #: than invented per-call.
 LIVE_CONFIDENCE_THRESHOLD = 80.0
 
+#: D-36 — the two Face Liveness challenges, as `CreateFaceLivenessSession` names them.
+#: `FaceMovementAndLightChallenge` (the service default) has the user move toward the camera and
+#: then hold still while the screen flashes a colour sequence, and AWS recommends it for the
+#: highest accuracy. `FaceMovementChallenge` drops the flashes and is several seconds faster.
+LIGHT_CHALLENGE = "FaceMovementAndLightChallenge"
+MOVEMENT_CHALLENGE = "FaceMovementChallenge"
+LIVENESS_CHALLENGES = (LIGHT_CHALLENGE, MOVEMENT_CHALLENGE)
+
 #: F-40 — a SessionId is unusable 3 minutes after CreateFaceLivenessSession. The Client App is
 #: expected to complete steps 3-7 inside this window; the backend does not enforce it directly
 #: (Rekognition itself returns SessionNotFoundException past expiry) but names the distinct
@@ -68,21 +76,56 @@ def _ddb():
     return boto3.client("dynamodb")
 
 
+def _challenge() -> str:
+    """The challenge this deployment asks for (`LIVENESS_CHALLENGE`, set by the stack).
+
+    Anything unset or unrecognised gets the service default, the light challenge: a typo must not
+    quietly select the less accurate check.
+    """
+    configured = os.environ.get("LIVENESS_CHALLENGE", "")
+    if configured in LIVENESS_CHALLENGES:
+        return configured
+    if configured:
+        LOG.warning("unknown LIVENESS_CHALLENGE %r; using %s", configured, LIGHT_CHALLENGE)
+    return LIGHT_CHALLENGE
+
+
+#: The case states in which liveness evidence may still be written: before the case is submitted
+#: (no state yet) and while the applicant has been asked for more. Once a case is submitted the
+#: evidence it is decided on must not change underneath it.
+ACCEPTING_STATE = "AWAITING_APPLICANT"
+_ACCEPTING_CONDITION = "(attribute_not_exists(#s) OR #s = :accepting)"
+
+
 def create_session(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]:
-    """`POST /liveness/session`. Body: `{"jurisdiction": "us"}`.
+    """`POST /liveness/session`. Body: `{"jurisdiction": "us", "applicationId": "..."}`.
 
     No caching, no reuse — every call creates and returns a brand new SessionId (F-41). The
     KMS key, if the jurisdiction has one already used for evidence, encrypts the reference and
     audit images Rekognition stores for the life of the session.
+
+    The session is bound to the caller's case as it is created. Only a bound session's result can
+    be written to that case, and only once, so a liveness PASS cannot be carried from one case to
+    another or replayed onto a case that has since failed.
     """
     body = _body(event)
     jurisdiction = str(body.get("jurisdiction") or "").lower()
     region = LIVENESS_REGION_BY_JURISDICTION.get(jurisdiction)
     if region is None:
         return _response(400, {"error": "UNSUPPORTED_JURISDICTION", "jurisdiction": jurisdiction})
+    applicant_id = applicant_id_from(event, body)
+    if not applicant_id:
+        return _response(400, {"error": "MISSING_APPLICATION_ID"})
 
     kms_key_id = os.environ.get(f"LIVENESS_KMS_KEY_{jurisdiction.upper()}") or None
-    settings: dict[str, Any] = {"AuditImagesLimit": 1}
+    challenge = _challenge()
+    settings: dict[str, Any] = {
+        "AuditImagesLimit": 1,
+        # Always sent, so the session's challenge is this deployment's choice rather than
+        # whatever the service default happens to be. The browser component reads the challenge
+        # from the session itself, so nothing client-side has to agree with this.
+        "ChallengePreferences": [{"Type": challenge}],
+    }
 
     # `GetFaceLivenessSessionResults` only returns `ReferenceImage.S3Object`/`AuditImages[].
     # S3Object` when this session was created with `Settings.OutputConfig.S3Bucket` set — without
@@ -117,8 +160,30 @@ def create_session(event: Mapping[str, Any], _context: Any = None) -> dict[str, 
     resp = client.create_face_liveness_session(**kwargs)
     session_id = resp["SessionId"]
 
-    LOG.info("liveness session created jurisdiction=%s region=%s", jurisdiction, region)
-    return _response(200, {"sessionId": session_id, "region": region})
+    try:
+        _ddb().update_item(
+            TableName=os.environ["CASE_TABLE_NAME"],
+            Key={"applicantId": {"S": applicant_id}, "sk": {"S": "CASE"}},
+            UpdateExpression=(
+                "SET pendingLivenessSessionId = :sid, pendingLivenessRegion = :region, "
+                "pendingLivenessCreatedAt = :t"),
+            ConditionExpression=_ACCEPTING_CONDITION,
+            ExpressionAttributeNames={"#s": "state"},
+            ExpressionAttributeValues={
+                ":sid": {"S": session_id}, ":region": {"S": region}, ":t": {"S": _now_iso()},
+                ":accepting": {"S": ACCEPTING_STATE}},
+        )
+    except Exception as exc:  # noqa: BLE001 - narrowed immediately by error code
+        if _error_code(exc) != "ConditionalCheckFailedException":
+            raise
+        # The unused session expires on its own within three minutes (F-40).
+        return _response(409, {"error": "CASE_NOT_ACCEPTING_LIVENESS"})
+
+    LOG.info("liveness session created jurisdiction=%s region=%s challenge=%s",
+             jurisdiction, region, challenge)
+    # The challenge is returned only so the page can say what to expect (flashing colours, or
+    # none); the browser component takes the challenge it runs from the session.
+    return _response(200, {"sessionId": session_id, "region": region, "challenge": challenge})
 
 
 def get_result(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]:
@@ -153,6 +218,19 @@ def get_result(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]
     if region is None or not session_id or not applicant_id:
         return _response(400, {"error": "MISSING_PARAMETERS"})
 
+    # Checked before anything is copied or written. A retry of a result already recorded is
+    # answered from the record; a session this case did not create is refused.
+    current = _ddb().get_item(
+        TableName=os.environ["CASE_TABLE_NAME"],
+        Key={"applicantId": {"S": applicant_id}, "sk": {"S": "CASE"}},
+        ConsistentRead=True,
+    ).get("Item") or {}
+    recorded = _recorded_result(current, session_id)
+    if recorded is not None:
+        return _response(200, {"isLive": recorded})
+    if (current.get("pendingLivenessSessionId") or {}).get("S") != session_id:
+        return _response(409, {"error": "SESSION_NOT_BOUND"})
+
     client = _clients(region)
     try:
         resp = client.get_face_liveness_session_results(SessionId=session_id)
@@ -180,14 +258,36 @@ def get_result(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]
         for i, img in enumerate(audit_images)
     ]
 
-    _persist_liveness_result(
-        applicant_id=applicant_id, is_live=is_live, region=region,
-        reference_image_key=ref_key, audit_image_keys=[k for k in audit_keys if k],
-    )
+    try:
+        _persist_liveness_result(
+            applicant_id=applicant_id, session_id=session_id, is_live=is_live, region=region,
+            reference_image_key=ref_key, audit_image_keys=[k for k in audit_keys if k],
+        )
+    except Exception as exc:  # noqa: BLE001 - narrowed immediately by error code
+        if _error_code(exc) != "ConditionalCheckFailedException":
+            raise
+        # A concurrent retry won the write, or the case was submitted in between.
+        again = _ddb().get_item(
+            TableName=os.environ["CASE_TABLE_NAME"],
+            Key={"applicantId": {"S": applicant_id}, "sk": {"S": "CASE"}},
+            ConsistentRead=True,
+        ).get("Item") or {}
+        recorded = _recorded_result(again, session_id)
+        if recorded is not None:
+            return _response(200, {"isLive": recorded})
+        return _response(409, {"error": "CASE_NOT_ACCEPTING_LIVENESS"})
 
     LOG.info("liveness result persisted applicantId=%s isLive=%s region=%s",
              applicant_id, is_live, region)
     return _response(200, {"isLive": is_live})
+
+
+def _recorded_result(item: Mapping[str, Any], session_id: str) -> bool | None:
+    """The result already recorded for this session, if this session's result is on the case."""
+    liveness = (item.get("liveness") or {}).get("M") or {}
+    if (liveness.get("sessionId") or {}).get("S") != session_id:
+        return None
+    return (liveness.get("result") or {}).get("S") == "PASS"
 
 
 def _persist_image(image: Mapping[str, Any], *, jurisdiction: str, applicant_id: str,
@@ -219,26 +319,38 @@ def _persist_image(image: Mapping[str, Any], *, jurisdiction: str, applicant_id:
     return key
 
 
-def _persist_liveness_result(*, applicant_id: str, is_live: bool, region: str,
+def _persist_liveness_result(*, applicant_id: str, session_id: str, is_live: bool, region: str,
                              reference_image_key: str | None,
                              audit_image_keys: list[str]) -> None:
-    table_name = os.environ["CASE_TABLE_NAME"]
-    ddb = _ddb()
-    ddb.update_item(
-        TableName=table_name,
+    """Record the result and consume the session, in one conditional write.
+
+    A failure is counted (`livenessFailures`), because R30.2 routes the third one to a reviewer
+    with an alternative path instead of asking again — and a count that could be reset by
+    re-running a session would make that limit decorative.
+    """
+    values: dict[str, Any] = {
+        ":l": {"M": {
+            "result": {"S": "PASS" if is_live else "FAILED"},
+            "sessionId": {"S": session_id},
+            "region": {"S": region},
+            "retrievedAt": {"S": _now_iso()},
+            "referenceImageKey": {"S": reference_image_key or ""},
+            "auditImageKeys": {"L": [{"S": k} for k in audit_image_keys]},
+        }},
+        ":sid": {"S": session_id},
+        ":accepting": {"S": ACCEPTING_STATE},
+    }
+    update = "SET liveness = :l REMOVE pendingLivenessSessionId"
+    if not is_live:
+        update += " ADD livenessFailures :one"
+        values[":one"] = {"N": "1"}
+    _ddb().update_item(
+        TableName=os.environ["CASE_TABLE_NAME"],
         Key={"applicantId": {"S": applicant_id}, "sk": {"S": "CASE"}},
-        UpdateExpression=(
-            "SET liveness = :l"
-        ),
-        ExpressionAttributeValues={
-            ":l": {"M": {
-                "result": {"S": "PASS" if is_live else "FAILED"},
-                "region": {"S": region},
-                "retrievedAt": {"S": _now_iso()},
-                "referenceImageKey": {"S": reference_image_key or ""},
-                "auditImageKeys": {"L": [{"S": k} for k in audit_image_keys]},
-            }},
-        },
+        UpdateExpression=update,
+        ConditionExpression=f"pendingLivenessSessionId = :sid AND {_ACCEPTING_CONDITION}",
+        ExpressionAttributeNames={"#s": "state"},
+        ExpressionAttributeValues=values,
     )
 
 

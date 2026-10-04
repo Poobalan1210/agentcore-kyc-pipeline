@@ -22,9 +22,13 @@ of thing someone in a re:Invent audience notices.
 TRAVEL DOCUMENT" band and a synthetic-data footer. Making these indistinguishable from genuine
 travel documents would be forgery, not a better demo; making them structurally faithful *and*
 clearly marked gets the demo value with none of that. Matches
-`tools/kyctools/data/sanctions.py`'s conventions: every value is fabricated, and no persona name
-collides with any entry in that module's screening data, so a demo run cannot accidentally
-produce a sanctions hit.
+`tools/kyctools/data/sanctions.py`'s conventions: every value is fabricated.
+
+**Each persona's screening outcome is chosen, and pinned by test.** Three of the US personas meet
+the synthetic list on purpose — a name overlap with a listing that has no date of birth, an exact
+namesake of a listed person born 26 years later, and a customer a later list update names — and
+`tests/test_gen_documents.py` runs the real matcher over every persona to hold each one to its
+scenario. Any other overlap would be an unintended hit on stage, and fails the same test.
 """
 
 from __future__ import annotations
@@ -81,14 +85,47 @@ class DemoIdentity:
     address: str
     issued: str              # ISO yyyy-mm-dd
     expiry: str              # ISO yyyy-mm-dd
+    #: What this persona shows on stage, in one line. Mirrored in `demoPersonas.ts`, behind the
+    #: console's New application menu, so the presenter picks a scenario rather than a name.
+    scenario: str = ""
 
     @property
     def full_name(self) -> str:
         return f"{self.given_names} {self.surname}"
 
 
-# Four personas, one per jurisdiction IntakeStep.tsx offers — enough to demo the full flow once
-# per market without needing a name generator at demo time.
+#: Act 3's sanctions list update, as the presenter publishes it from the console's Demo controls
+#: (`frontend/apps/console/src/controls/ControlsView.tsx` `ACT3_ENTRY`, held equal by test). It
+#: names DEMO-US-03 exactly — name, date of birth and country — so the re-screen of her open
+#: account is CONFIRMED.
+ACT3_LIST_UPDATE: dict[str, str] = {
+    "entryId": "SYN-0901",
+    "name": "Nadia Rose Korval",
+    "dob": "1987-02-11",
+    "country": "US",
+}
+
+#: The rest of Act 3's update (`ControlsView.tsx` `ACT3_OTHER_ENTRIES`, held equal by test). A
+#: real list update arrives as a batch, and the point of the act is that the re-screen finds the
+#: one listing that names a customer among the ones that do not. These share no name token with
+#: any persona and no persona's date of birth, so they leave every screening exactly as it was;
+#: the tests run them through the real matcher to keep it that way.
+ACT3_OTHER_LISTINGS: tuple[dict[str, str], ...] = (
+    {"entryId": "SYN-0902", "name": "Orrin Castellane", "dob": "1975-09-14", "country": "MT"},
+    {"entryId": "SYN-0903", "name": "Lucian Varga", "dob": "1979-06-02", "country": "RO"},
+    {"entryId": "SYN-0904", "name": "Ignatius Moreau", "dob": "1968-12-01", "country": "FR"},
+)
+
+#: The whole of Act 3's update, in the order the console publishes it.
+ACT3_BATCH: tuple[dict[str, str], ...] = (ACT3_LIST_UPDATE, *ACT3_OTHER_LISTINGS)
+
+
+_OUTSIDE_US = ("Outside the US: goes to a reviewer, because this build decides only US cases "
+               "automatically")
+
+# One persona per jurisdiction IntakeStep.tsx offers, plus three more in the US — the one
+# jurisdiction this build decides automatically (`DECIDED_JURISDICTIONS`), so the only place a
+# screening scenario can play out end to end without a reviewer stepping in for the jurisdiction.
 DEMO_IDENTITIES: tuple[DemoIdentity, ...] = (
     DemoIdentity(
         persona_id="DEMO-US-01", surname="REEVES", given_names="TAYLOR JORDAN",
@@ -98,6 +135,40 @@ DEMO_IDENTITIES: tuple[DemoIdentity, ...] = (
         authority="UNITED STATES DEPARTMENT OF STATE (SPECIMEN)",
         address="482 Kestrel Way, Austin, TX 78701, USA",
         issued="2022-05-14", expiry="2032-05-13",
+        scenario="Clean path: a provisional account in under 90 seconds, limits lifted later",
+    ),
+    DemoIdentity(
+        persona_id="DEMO-US-02", surname="HALE", given_names="AVERY QUINN",
+        dob="1990-03-22", sex="F", document_type="PASSPORT", document_number="538204716",
+        issuing_country="US", mrz_country="USA", jurisdiction="us",
+        nationality="UNITED STATES OF AMERICA", place_of_birth="DENVER, COLORADO, U.S.A.",
+        authority="UNITED STATES DEPARTMENT OF STATE (SPECIMEN)",
+        address="1150 Larkspur Avenue, Denver, CO 80203, USA",
+        issued="2021-03-22", expiry="2031-03-21",
+        scenario=("Possible match: SYN-0106 'Avery Hale' is listed with no date of birth, so a "
+                  "person decides; approving clears the alert for good"),
+    ),
+    DemoIdentity(
+        persona_id="DEMO-US-03", surname="KORVAL", given_names="NADIA ROSE",
+        dob="1987-02-11", sex="F", document_type="PASSPORT", document_number="629417308",
+        issuing_country="US", mrz_country="USA", jurisdiction="us",
+        nationality="UNITED STATES OF AMERICA", place_of_birth="SEATTLE, WASHINGTON, U.S.A.",
+        authority="UNITED STATES DEPARTMENT OF STATE (SPECIMEN)",
+        address="77 Harbor View Drive, Seattle, WA 98101, USA",
+        issued="2020-02-11", expiry="2030-02-10",
+        scenario=("Act 3: clean at onboarding; the list update SYN-0901 names her, and the "
+                  "re-screen of her open account freezes it"),
+    ),
+    DemoIdentity(
+        persona_id="DEMO-US-04", surname="VOLKOV", given_names="DMITRI",
+        dob="1994-10-05", sex="M", document_type="PASSPORT", document_number="746039215",
+        issuing_country="US", mrz_country="USA", jurisdiction="us",
+        nationality="UNITED STATES OF AMERICA", place_of_birth="CHICAGO, ILLINOIS, U.S.A.",
+        authority="UNITED STATES DEPARTMENT OF STATE (SPECIMEN)",
+        address="2209 Birchwood Lane, Chicago, IL 60614, USA",
+        issued="2024-10-05", expiry="2034-10-04",
+        scenario=("Namesake: the exact name of SYN-0001, born 26 years later; excluded on date "
+                  "of birth, with the reason recorded, and approved"),
     ),
     DemoIdentity(
         persona_id="DEMO-UK-01", surname="OSEI-BRIGHT", given_names="ALISTAIR",
@@ -107,6 +178,7 @@ DEMO_IDENTITIES: tuple[DemoIdentity, ...] = (
         authority="DRIVER AND VEHICLE LICENSING AGENCY (SPECIMEN)",
         address="14 Harrow Close, Manchester, M1 4BT, United Kingdom",
         issued="2020-11-02", expiry="2030-11-01",
+        scenario=_OUTSIDE_US,
     ),
     DemoIdentity(
         persona_id="DEMO-AU-01", surname="WHITLAM", given_names="MORGAN KIRI",
@@ -116,6 +188,7 @@ DEMO_IDENTITIES: tuple[DemoIdentity, ...] = (
         authority="AUSTRALIAN GOVERNMENT (SPECIMEN)",
         address="27 Banksia Street, Fremantle, WA 6160, Australia",
         issued="2019-02-27", expiry="2029-02-26",
+        scenario=_OUTSIDE_US,
     ),
     DemoIdentity(
         persona_id="DEMO-JP-01", surname="ICHIKAWA", given_names="HARUTO",
@@ -125,6 +198,7 @@ DEMO_IDENTITIES: tuple[DemoIdentity, ...] = (
         authority="MINISTRY OF FOREIGN AFFAIRS (SPECIMEN)",
         address="3-2-1 Marunouchi, Chiyoda-ku, Tokyo 100-0005, Japan",
         issued="2023-08-19", expiry="2033-08-18",
+        scenario=_OUTSIDE_US,
     ),
 )
 
@@ -477,8 +551,11 @@ def build_pdf_bytes(identity: DemoIdentity, photo: JpegInfo | None = None) -> by
         ).encode("ascii"),
     ]
     for name in _FONTS:
+        # WinAnsiEncoding, not the default StandardEncoding: the content stream is latin-1, and
+        # StandardEncoding has no glyph at 0xB0, so the "°" in "N° DU DOCUMENT" printed as a gap.
         objects.append(
-            f"<< /Type /Font /Subtype /Type1 /BaseFont /{name} >>".encode("ascii"))
+            f"<< /Type /Font /Subtype /Type1 /BaseFont /{name} "
+            f"/Encoding /WinAnsiEncoding >>".encode("ascii"))
 
     stream_bytes = content.encode("latin-1")
     objects.append(

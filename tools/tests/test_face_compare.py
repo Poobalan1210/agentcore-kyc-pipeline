@@ -1,30 +1,22 @@
-"""Face comparison across two buckets.
+"""Face comparison: both images from the case record, the threshold fixed server side.
 
-The point of these tests is that the two images are *never* in the same bucket, by design: the
-document is under Object Lock for seven years, while the liveness reference frame must remain
-deletable within 24 hours (R36.1-R36.3). A tool that accepted one bucket for both could not perform
-this comparison at all, which left the strongest identity control inert while looking implemented.
+Two properties are pinned here.
+
+**The images come from the case record.** The document is the first one listed on the case, in the
+jurisdiction evidence bucket (Object Lock, seven years); the liveness reference frame is
+`liveness.referenceImageKey` in the biometric bucket (24-hour lifecycle, because a real face must
+stay deletable — R36.1-R36.3). An agent cannot point the comparison at other images.
+
+**The threshold is not the agent's.** An earlier version accepted `threshold` as an argument, so an
+agent persuaded to pass 0 would have turned any detected face into a "match".
 """
 
 from __future__ import annotations
 
-import sys
-
 import pytest
 
-from kyctools.contract import Status
-from kyctools.tools_impl import rekognition_compare_faces
-
-EVIDENCE = "kyc90-evidence-us-633898796092"
-BIOMETRIC = "kyc90-demo-biometric-633898796092"
-DOC_KEY = "APP-1/PASSPORT-abc123"
-FRAME_KEY = "APP-1/reference-def456.jpg"
-
-
-class AwsError(Exception):
-    def __init__(self, code: str):
-        super().__init__(code)
-        self.response = {"Error": {"Code": code}}
+from kyctools.contract import Status, ToolError
+from kyctools.tools_impl import FACE_MATCH_THRESHOLD, rekognition_compare_faces
 
 
 class FakeRekognition:
@@ -46,113 +38,105 @@ class FakeRekognition:
 
 
 @pytest.fixture
-def rek(monkeypatch):
+def rek(aws):
     fake = FakeRekognition()
-
-    class M:
-        @staticmethod
-        def client(name, **kw):
-            assert name == "rekognition"
-            return fake
-
-    monkeypatch.setitem(sys.modules, "boto3", M())
-    # botocore's ClientError is imported inside the tool; the real module is available in the venv,
-    # but the fake raises our own AwsError, so the except clause must still match. Patching only
-    # boto3 keeps botocore real, and `AwsError` is caught by the generic handler below.
+    aws.boto3.clients["rekognition"] = fake
+    aws.seed("APP-1")
     return fake
 
 
-class TestTwoBuckets:
-    def test_each_image_gets_its_own_bucket(self, rek):
-        rekognition_compare_faces(
-            {"sourceBucket": EVIDENCE, "sourceKey": DOC_KEY,
-             "targetBucket": BIOMETRIC, "targetKey": FRAME_KEY}, {})
+def compare(**extra):
+    return rekognition_compare_faces({"applicantId": "APP-1", **extra}, {})
+
+
+class TestImagesComeFromTheCaseRecord:
+    def test_each_image_gets_its_own_bucket(self, rek, aws):
+        compare()
         call = rek.calls[0]
-        assert call["SourceImage"]["S3Object"]["Bucket"] == EVIDENCE
-        assert call["SourceImage"]["S3Object"]["Name"] == DOC_KEY
-        assert call["TargetImage"]["S3Object"]["Bucket"] == BIOMETRIC
-        assert call["TargetImage"]["S3Object"]["Name"] == FRAME_KEY
+        assert call["SourceImage"]["S3Object"] == {"Bucket": aws.EVIDENCE_BUCKET,
+                                                   "Name": "APP-1/PASSPORT-1"}
+        assert call["TargetImage"]["S3Object"] == {"Bucket": aws.BIOMETRIC_BUCKET,
+                                                   "Name": "APP-1/reference-1.jpg"}
 
-    def test_the_target_bucket_defaults_from_the_environment(self, rek, monkeypatch):
-        """Defaulted rather than demanded from the agent: a model that guessed the wrong bucket
-        would get an unreadable-image finding, which reads as a bad document rather than as a
-        misrouted lookup."""
-        monkeypatch.setenv("BIOMETRIC_BUCKET", BIOMETRIC)
-        rekognition_compare_faces(
-            {"sourceBucket": EVIDENCE, "sourceKey": DOC_KEY, "targetKey": FRAME_KEY}, {})
-        assert rek.calls[0]["TargetImage"]["S3Object"]["Bucket"] == BIOMETRIC
-
-    def test_a_single_bucket_argument_still_works_for_both(self, rek, monkeypatch):
-        """Back-compatibility for an existing caller. Not the intended path — no such pair of
-        objects exists in this system — but it must not become an error."""
-        monkeypatch.delenv("BIOMETRIC_BUCKET", raising=False)
-        rekognition_compare_faces(
-            {"bucket": EVIDENCE, "sourceKey": DOC_KEY, "targetKey": FRAME_KEY}, {})
+    def test_images_named_by_the_agent_are_ignored(self, rek, aws):
+        compare(sourceBucket="attacker-bucket", sourceKey="clean-face.jpg",
+                targetBucket="attacker-bucket", targetKey="clean-face.jpg")
         call = rek.calls[0]
-        assert call["SourceImage"]["S3Object"]["Bucket"] == EVIDENCE
-        assert call["TargetImage"]["S3Object"]["Bucket"] == EVIDENCE
+        assert call["SourceImage"]["S3Object"]["Name"] == "APP-1/PASSPORT-1"
+        assert call["TargetImage"]["S3Object"]["Name"] == "APP-1/reference-1.jpg"
 
-    def test_an_explicit_target_bucket_beats_the_environment_default(self, rek, monkeypatch):
-        monkeypatch.setenv("BIOMETRIC_BUCKET", "some-other-bucket")
-        rekognition_compare_faces(
-            {"sourceBucket": EVIDENCE, "sourceKey": DOC_KEY,
-             "targetBucket": BIOMETRIC, "targetKey": FRAME_KEY}, {})
-        assert rek.calls[0]["TargetImage"]["S3Object"]["Bucket"] == BIOMETRIC
+    def test_the_threshold_cannot_be_lowered_by_the_agent(self, rek):
+        compare(threshold=0)
+        assert rek.calls[0]["SimilarityThreshold"] == FACE_MATCH_THRESHOLD == 90.0
 
-    def test_missing_a_bucket_for_either_image_is_invalid(self, rek, monkeypatch):
-        monkeypatch.delenv("BIOMETRIC_BUCKET", raising=False)
-        result = rekognition_compare_faces(
-            {"sourceKey": DOC_KEY, "targetKey": FRAME_KEY}, {})
+    def test_no_reference_frame_is_recorded_as_not_performed(self, rek, aws):
+        """Ours to fix, not the applicant's: UNAVAILABLE, so it routes to a human."""
+        aws.seed("APP-1", liveness={"result": "PASS", "region": "eu-west-1",
+                                    "referenceImageKey": ""})
+        result = compare()
         assert result.status is Status.INVALID
-        assert result.reason_code == "MISSING_LOCATION"
+        assert result.reason_code == "NO_REFERENCE_FRAME"
+        assert rek.calls == []
+        fact = aws.ddb.fact("APP-1", "factFaceMatch")
+        assert fact["performed"] is False
+        assert fact["status"] == "UNAVAILABLE"
 
-    def test_missing_a_key_is_invalid(self, rek):
-        result = rekognition_compare_faces(
-            {"sourceBucket": EVIDENCE, "targetBucket": BIOMETRIC, "sourceKey": DOC_KEY}, {})
+    def test_no_document_on_the_case_is_invalid(self, rek, aws):
+        aws.seed("APP-1", documents=[])
+        result = compare()
         assert result.status is Status.INVALID
+        assert result.reason_code == "NO_DOCUMENT_ON_CASE"
+
+    def test_an_unconfigured_biometric_bucket_is_an_outage(self, rek, monkeypatch):
+        monkeypatch.delenv("BIOMETRIC_BUCKET")
+        with pytest.raises(ToolError):
+            compare()
 
 
 class TestResultShape:
-    def test_a_match_returns_a_band_and_never_a_raw_score(self, rek):
-        """F-44/R33.2 — the threshold is applied server side and the raw similarity is not the
-        agent's business. A raw score in the response would let the agent re-threshold it."""
-        result = rekognition_compare_faces(
-            {"sourceBucket": EVIDENCE, "sourceKey": DOC_KEY,
-             "targetBucket": BIOMETRIC, "targetKey": FRAME_KEY}, {})
+    def test_a_match_returns_a_band_and_never_a_raw_score(self, rek, aws):
+        """F-44/R33.2 — the raw similarity is not the agent's business, nor the record's."""
+        result = compare()
         assert result.status is Status.OK
         assert result.data["match"] is True
         assert result.data["similarityBand"] == "HIGH"
-        serialised = str(result.data)
-        assert "97.5" not in serialised
-        assert "similarity" not in result.data
+        assert "97.5" not in str(result.data)
+        fact = aws.ddb.fact("APP-1", "factFaceMatch")
+        assert fact["performed"] is True and fact["match"] is True
+        assert "97.5" not in str(fact)
 
     @pytest.mark.parametrize(("similarity", "band"), [(99.0, "HIGH"), (92.0, "MEDIUM")])
-    def test_bands_are_bucketed(self, monkeypatch, similarity, band):
-        fake = FakeRekognition(similarity=similarity)
+    def test_bands_are_bucketed(self, rek, similarity, band):
+        rek.similarity = similarity
+        assert compare().data["similarityBand"] == band
 
-        class M:
-            @staticmethod
-            def client(name, **kw):
-                return fake
-
-        monkeypatch.setitem(sys.modules, "boto3", M())
-        result = rekognition_compare_faces(
-            {"sourceBucket": EVIDENCE, "sourceKey": DOC_KEY,
-             "targetBucket": BIOMETRIC, "targetKey": FRAME_KEY}, {})
-        assert result.data["similarityBand"] == band
-
-    def test_no_match_is_a_clean_negative_not_an_error(self, monkeypatch):
-        fake = FakeRekognition(matches=False)
-
-        class M:
-            @staticmethod
-            def client(name, **kw):
-                return fake
-
-        monkeypatch.setitem(sys.modules, "boto3", M())
-        result = rekognition_compare_faces(
-            {"sourceBucket": EVIDENCE, "sourceKey": DOC_KEY,
-             "targetBucket": BIOMETRIC, "targetKey": FRAME_KEY}, {})
+    def test_no_match_is_a_clean_negative_not_an_error(self, rek, aws):
+        rek.matches = False
+        result = compare()
         assert result.status is Status.OK
         assert result.data["match"] is False
         assert result.data["faceDetected"] is True
+        assert aws.ddb.fact("APP-1", "factFaceMatch")["match"] is False
+
+    def test_no_face_found_is_a_finding(self, rek, aws):
+        rek.error = aws.AwsError("InvalidParameterException")
+        result = compare()
+        assert result.status is Status.OK
+        fact = aws.ddb.fact("APP-1", "factFaceMatch")
+        assert fact["performed"] is True
+        assert fact["faceDetected"] is False
+
+    def test_an_unreadable_image_is_invalid_and_recorded(self, rek, aws):
+        rek.error = aws.AwsError("InvalidImageFormatException")
+        result = compare()
+        assert result.status is Status.INVALID
+        assert aws.ddb.fact("APP-1", "factFaceMatch")["reasonCode"] == "IMAGE_UNREADABLE"
+
+    def test_an_outage_raises_and_is_recorded_as_unavailable(self, rek, aws):
+        rek.error = aws.AwsError("ThrottlingException")
+        with pytest.raises(ToolError):
+            compare()
+        # The dispatcher records nothing itself; the tool records the outage before raising.
+        fact = aws.ddb.fact("APP-1", "factFaceMatch")
+        assert fact["performed"] is False
+        assert fact["reasonCode"] == "REKOGNITION_UNAVAILABLE"

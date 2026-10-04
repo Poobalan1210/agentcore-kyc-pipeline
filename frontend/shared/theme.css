@@ -1,46 +1,80 @@
 /*
- * Shared design tokens — task 14.5/14.6/14.7.
+ * Design tokens and base styles for the KYC90 console.
  *
- * Deliberately restrained: a neutral grey/ink palette with one accent colour, no gradients, no
- * decorative shadows beyond a single low-elevation card shadow. This is an operational tool for
- * a bank's compliance workflow and an applicant's identity verification flow, not a marketing
- * site — the visual language should read as precise and quiet rather than as a demo.
+ * Two palettes from one set of names:
+ *
+ *  * The console itself is dark, built for a stage: a deep navy ground, quiet surfaces, one violet
+ *    accent and status colours bright enough to read from the back of a hall.
+ *  * `.kyc-light` re-declares the same tokens light. The phone's screen uses it, so the
+ *    customer's banking app reads as a real app on a real device, and every applicant component
+ *    renders the same in either place.
+ *
+ * Status colours carry meaning everywhere: cyan running, green done, amber needs attention, rose
+ * refused or failed. No webfont request: the platform UI font (SF Pro on a Mac) is the face.
  */
 
 :root {
-  /* Neutrals — the majority of the interface. */
-  --color-bg: #f7f8fa;
-  --color-surface: #ffffff;
-  --color-border: #d9dce1;
-  --color-border-strong: #b7bcc4;
-  --color-text: #1a1d21;
-  --color-text-secondary: #5b6270;
-  --color-text-tertiary: #8a8f99;
+  color-scheme: dark;
 
-  /* One accent, used sparingly: primary actions and links only. */
-  --color-accent: #1f4fd8;
-  --color-accent-hover: #1a41b4;
-  --color-accent-subtle: #eaf0fd;
+  /* Ground and surfaces. */
+  --color-bg: #070a14;
+  --color-surface: #0d1323;
+  --color-surface-raised: #131b2f;
+  --color-surface-muted: #0a0f1d;
+  --color-input-bg: #0a101e;
+  --color-border: rgba(148, 163, 184, 0.14);
+  --color-border-strong: rgba(148, 163, 184, 0.28);
+  --color-text: #e8edf7;
+  --color-text-secondary: #a7b1c7;
+  --color-text-tertiary: #7d89a3;
 
-  /* Status colours — desaturated, not traffic-light bright. */
-  --color-success: #1c7c4c;
-  --color-success-bg: #e9f6ee;
-  --color-warning: #9a6300;
-  --color-warning-bg: #fdf3e0;
-  --color-danger: #b3261e;
-  --color-danger-bg: #fbe9e7;
-  --color-info: #1f4fd8;
-  --color-info-bg: #eaf0fd;
+  /* One accent: primary actions, links, focus, the current view. */
+  --color-accent: #9aa2ff;
+  --color-accent-strong: #6e6bff;
+  --color-accent-hover: #b7bcff;
+  --color-accent-subtle: rgba(124, 131, 255, 0.14);
+  --color-accent-ring: rgba(124, 131, 255, 0.5);
+  --gradient-accent: linear-gradient(135deg, #8b5cf6 0%, #6366f1 48%, #3b82f6 100%);
+  --gradient-headline: linear-gradient(90deg, #c4b5fd 0%, #93c5fd 55%, #67e8f9 100%);
+  --color-on-accent: #ffffff;
+  --shadow-accent: 0 8px 24px rgba(99, 102, 241, 0.35);
 
-  /* Elevation: one shadow, one radius scale. */
-  --shadow-card: 0 1px 2px rgba(16, 18, 22, 0.06), 0 1px 1px rgba(16, 18, 22, 0.04);
-  --radius-sm: 4px;
-  --radius-md: 8px;
+  /* Status. */
+  --color-running: #38bdf8;
+  --color-running-bg: rgba(56, 189, 248, 0.12);
+  --color-running-border: rgba(56, 189, 248, 0.4);
+  --color-success: #34d399;
+  --color-success-bg: rgba(52, 211, 153, 0.12);
+  --color-success-border: rgba(52, 211, 153, 0.36);
+  --color-warning: #fbbf24;
+  --color-warning-bg: rgba(251, 191, 36, 0.12);
+  --color-warning-border: rgba(251, 191, 36, 0.38);
+  --color-on-warning: #1c1405;
+  --color-danger: #fb7185;
+  --color-danger-bg: rgba(251, 113, 133, 0.12);
+  --color-danger-border: rgba(251, 113, 133, 0.38);
+  --color-info: #7cb4ff;
+  --color-info-bg: rgba(96, 165, 250, 0.12);
+  --color-info-border: rgba(96, 165, 250, 0.36);
+  --color-neutral-bg: rgba(148, 163, 184, 0.1);
 
-  /* Type scale. System font stack — no webfont request adds latency to a KYC flow. */
-  --font-sans:
-    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-mono: "SF Mono", "Consolas", "Liberation Mono", monospace;
+  /* Agents: the colour of "an agent did this", distinct from any status. */
+  --color-agent: #c4b5fd;
+  --color-agent-bg: rgba(167, 139, 250, 0.13);
+  --color-agent-border: rgba(167, 139, 250, 0.34);
+
+  /* Elevation and shape. */
+  --shadow-card: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 16px 40px rgba(0, 0, 0, 0.32);
+  --shadow-raised: 0 28px 64px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", system-ui,
+    Roboto, Helvetica, Arial, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", "Segoe UI",
+    system-ui, Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -49,6 +83,54 @@
   --space-5: 24px;
   --space-6: 32px;
   --space-8: 48px;
+}
+
+/* The customer's app, on the phone: the same tokens, light. */
+.kyc-light {
+  color-scheme: light;
+
+  --color-bg: #f4f6fb;
+  --color-surface: #ffffff;
+  --color-surface-raised: #f7f8fc;
+  --color-surface-muted: #f4f6fb;
+  --color-input-bg: #f2f4f8;
+  --color-border: #e3e7ef;
+  --color-border-strong: #cfd6e3;
+  --color-text: #0f1426;
+  --color-text-secondary: #4b5571;
+  --color-text-tertiary: #7a849c;
+
+  --color-accent: #4f46e5;
+  --color-accent-strong: #4338ca;
+  --color-accent-hover: #4338ca;
+  --color-accent-subtle: #eef0ff;
+  --color-accent-ring: rgba(79, 70, 229, 0.28);
+  --gradient-accent: linear-gradient(135deg, #6366f1 0%, #4f46e5 55%, #7c3aed 100%);
+  --color-on-accent: #ffffff;
+  --shadow-accent: 0 8px 20px rgba(79, 70, 229, 0.3);
+
+  --color-running: #0284c7;
+  --color-running-bg: #e0f2fe;
+  --color-running-border: #bae6fd;
+  --color-success: #047857;
+  --color-success-bg: #ecfdf5;
+  --color-success-border: #a7f3d0;
+  --color-warning: #b45309;
+  --color-warning-bg: #fffbeb;
+  --color-warning-border: #fde68a;
+  --color-on-warning: #1c1405;
+  --color-danger: #be123c;
+  --color-danger-bg: #fff1f2;
+  --color-danger-border: #fecdd3;
+  --color-info: #1d4ed8;
+  --color-info-bg: #eff6ff;
+  --color-info-border: #bfdbfe;
+  --color-neutral-bg: #f1f4f9;
+
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.07);
+  --shadow-raised: 0 12px 32px rgba(15, 23, 42, 0.14), 0 2px 6px rgba(15, 23, 42, 0.06);
+
+  color: var(--color-text);
 }
 
 * {
@@ -63,11 +145,41 @@ body {
 
 body {
   font-family: var(--font-sans);
-  background: var(--color-bg);
+  background:
+    radial-gradient(70% 55% at 8% -8%, rgba(124, 92, 255, 0.16), transparent 62%),
+    radial-gradient(60% 50% at 100% 0%, rgba(56, 189, 248, 0.08), transparent 60%),
+    radial-gradient(70% 60% at 90% 110%, rgba(99, 102, 241, 0.1), transparent 60%),
+    var(--color-bg);
+  background-attachment: fixed;
   color: var(--color-text);
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  scrollbar-color: rgba(148, 163, 184, 0.28) transparent;
+}
+
+/* A faint grid behind everything, fading out toward the bottom: the "control room" ground. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 25%, transparent 78%);
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, #000 25%, transparent 78%);
+}
+
+#root {
+  position: relative;
+}
+
+::selection {
+  background: rgba(124, 131, 255, 0.38);
 }
 
 h1,
@@ -75,12 +187,14 @@ h2,
 h3,
 h4 {
   margin: 0;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-family: var(--font-display);
+  font-weight: 650;
+  letter-spacing: -0.012em;
+  color: var(--color-text);
 }
 
 h1 {
-  font-size: 22px;
+  font-size: 24px;
 }
 
 h2 {
@@ -88,10 +202,16 @@ h2 {
 }
 
 h3 {
-  font-size: 14px;
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 650;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-text-secondary);
+  letter-spacing: 0.08em;
+  color: var(--color-text-tertiary);
+}
+
+h4 {
+  font-size: 14px;
 }
 
 p {
@@ -104,6 +224,7 @@ a {
 }
 
 a:hover {
+  color: var(--color-accent-hover);
   text-decoration: underline;
 }
 
@@ -111,44 +232,88 @@ button {
   font-family: inherit;
 }
 
-/* Focus visibility — WCAG 2.1 AA (R32.11). A 2px outline offset from the element, never
-   removed, since this application is not permitted to trade accessibility for aesthetics. */
+code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--color-neutral-bg);
+  color: var(--color-text);
+}
+
+/* Focus visibility (WCAG 2.1 AA, R32.11): always visible, never removed. */
 :focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
 
-/* ---------------------------------------------------------------- shared form/flow utilities */
+/* Tabular figures wherever a number changes in place: timers, amounts, durations. */
+.kyc-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- forms */
 
 .kyc-form-row {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 6px;
   margin-bottom: var(--space-4);
 }
 
 .kyc-form-row label {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 550;
   color: var(--color-text-secondary);
 }
 
 .kyc-form-row select,
 .kyc-form-row input,
+.kyc-form-row textarea,
 input[type="file"] {
-  padding: 8px 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-sm);
+  font-family: inherit;
   font-size: 14px;
+  background: var(--color-input-bg);
+  color: var(--color-text);
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+
+.kyc-form-row select:focus,
+.kyc-form-row input:focus,
+.kyc-form-row textarea:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-ring);
+}
+
+input[type="file"] {
+  padding: 8px;
+  cursor: pointer;
+}
+
+input[type="file"]::file-selector-button {
+  margin-right: 10px;
+  padding: 6px 12px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
   background: var(--color-surface);
   color: var(--color-text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 .kyc-hint {
   font-size: 13px;
   color: var(--color-text-secondary);
   margin: var(--space-3) 0;
-  line-height: 1.5;
+  line-height: 1.55;
 }
 
 .kyc-error-text {
@@ -156,6 +321,19 @@ input[type="file"] {
   color: var(--color-danger);
   margin: var(--space-2) 0;
 }
+
+.kyc-warning-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  margin: var(--space-3) 0;
+}
+
+/* ---------------------------------------------------------------- applicant flow utilities */
 
 .kyc-document-list {
   list-style: none;
@@ -173,6 +351,7 @@ input[type="file"] {
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
   font-size: 13px;
 }
 
@@ -188,18 +367,9 @@ input[type="file"] {
   border: none;
   color: var(--color-danger);
   font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
   padding: 0;
-}
-
-.kyc-liveness-frame {
-  max-width: 480px;
-  margin: 0 auto;
-}
-
-.kyc-liveness-error {
-  text-align: center;
-  padding: var(--space-6) 0;
 }
 
 .kyc-progress {
@@ -211,8 +381,8 @@ input[type="file"] {
 }
 
 .kyc-progress__spinner {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border: 3px solid var(--color-border);
   border-top-color: var(--color-accent);
   border-radius: 50%;
@@ -223,15 +393,87 @@ input[type="file"] {
   font-size: 13px;
   color: var(--color-text-secondary);
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .kyc-result-description {
   margin: var(--space-3) 0 var(--space-4);
-  line-height: 1.5;
+  line-height: 1.55;
 }
+
+/* ---------------------------------------------------------------- motion */
 
 @keyframes kyc-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes kyc-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* Something just landed: a short scale-in, once. */
+@keyframes kyc-pop {
+  0% {
+    transform: scale(0.4);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.12);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes kyc-fade-up {
+  from {
+    transform: translateY(6px);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* Work in progress: stripes moving along a bar. */
+@keyframes kyc-stripes {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 28px 0;
+  }
+}
+
+/* A live dot: a ring that grows and fades. */
+@keyframes kyc-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  80%,
+  100% {
+    transform: scale(2.4);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

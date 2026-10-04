@@ -10,6 +10,10 @@ separately-invoked action.
 Waits out `CREATING` before deleting — `DeletePolicy` is rejected with `ConflictException` on a
 policy that has not reached a terminal state yet, and a delete loop that ignores that leaves
 exactly the half-deleted engines this stage kept ending up with.
+
+Only this system's engines (`kyc90_policy_*`): the account may hold other projects' engines, and
+`make destroy` runs this before deleting the stacks, because an engine with policies on it
+cannot be deleted.
 """
 
 from __future__ import annotations
@@ -19,11 +23,26 @@ import sys
 import boto3
 
 REGION = "us-east-1"
+ENGINE_PREFIX = "kyc90_policy_"
 
 
-def sweep() -> int:
+def _engines(bac) -> list[str]:
+    ids: list[str] = []
+    token: str | None = None
+    while True:
+        resp = bac.list_policy_engines(**({"nextToken": token} if token else {}))
+        ids += [e["policyEngineId"] for e in resp.get("policyEngines", [])
+                if str(e.get("name", "")).startswith(ENGINE_PREFIX)]
+        token = resp.get("nextToken")
+        if not token:
+            return ids
+
+
+def sweep(*, failed_only: bool = False) -> int:
+    """`failed_only` deletes only CREATE_FAILED policies: they have no effect, but each holds
+    its name, and names are unique per account."""
     bac = boto3.client("bedrock-agentcore-control", region_name=REGION)
-    engines = [e["policyEngineId"] for e in bac.list_policy_engines().get("policyEngines", [])]
+    engines = _engines(bac)
     total = 0
 
     for engine_id in engines:
@@ -40,8 +59,10 @@ def sweep() -> int:
             if not token:
                 break
 
+        if failed_only:
+            policies = {k: p for k, p in policies.items() if p["status"] == "CREATE_FAILED"}
         if not policies:
-            print(f"{engine_id}: already empty")
+            print(f"{engine_id}: {'no failed policies' if failed_only else 'already empty'}")
             continue
 
         print(f"{engine_id}: deleting {len(policies)} policies")
@@ -65,4 +86,4 @@ def sweep() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(sweep())
+    sys.exit(sweep(failed_only="--failed-only" in sys.argv[1:]))

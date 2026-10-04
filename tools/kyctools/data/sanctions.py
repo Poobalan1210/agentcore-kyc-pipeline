@@ -26,7 +26,11 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import dataclass, field
 
-LIST_VERSION = "SYNTHETIC-2026-08-01"
+#: Bumped when the base list changed shape: the decoys left the list (they are applicants now, see
+#: `NAMESAKE_APPLICANTS`) and SYN-0006 and SYN-0106 were added. Screening results carry this
+#: version, so a result produced against the old list can never be mistaken for one produced
+#: against this one.
+LIST_VERSION = "SYNTHETIC-2026-10-01"
 LIST_SOURCE = "synthetic-consolidated-list (NOT a real sanctions source)"
 
 
@@ -39,14 +43,13 @@ class Entry:
     programme: str
     #: Alternate spellings the real lists carry as a.k.a. values.
     aliases: tuple[str, ...] = field(default_factory=tuple)
-    #: True designation vs a decoy that exists to generate a false positive.
-    is_true_designation: bool = True
     note: str = ""
 
 
 # --------------------------------------------------------------------- exact-match seeds
-# R25.5 requires the pre-screen to find all five exact matches with zero misses. These are the
-# only entries the Phase 1 pre-screen can match, because it does exact matching only (R11.2).
+# R25.5 requires the pre-screen to find all five exact matches with zero misses. Phase 1 now runs
+# the full deterministic matcher (exact and variant), so these are no longer the only entries it
+# can match; they remain the ones it must never miss.
 EXACT_MATCH_SEEDS: tuple[Entry, ...] = (
     Entry(entry_id="SYN-0001", name="Dmitri Volkov", dob="1968-04-12", country="RU",
           programme="SYN-RUSSIA", note="exact-match seed 1 of 5"),
@@ -84,38 +87,76 @@ FUZZY_SEEDS: tuple[Entry, ...] = (
           note="R27.1 patronymic and particle variants"),
 )
 
-# --------------------------------------------------------------------- deliberate decoys
-# These are the point of the dataset. Each is designed to *look* like a hit and not be one, so
-# the review queue is exercised and the false-positive rate in R25.4 is measurable rather than
-# theoretical. B-08: this is the common case in production, not the edge case.
-FALSE_POSITIVE_DECOYS: tuple[Entry, ...] = (
-    Entry(entry_id="SYN-0201", name="David Smith", dob="1980-01-01", country="GB",
-          programme="SYN-CORRUPTION", is_true_designation=False,
-          note="extremely common name; collides with many clean applicants"),
-    Entry(entry_id="SYN-0202", name="Maria Garcia", dob="1977-04-04", country="ES",
-          programme="SYN-CORRUPTION", is_true_designation=False,
-          note="extremely common name"),
-    Entry(entry_id="SYN-0203", name="Wei Zhang", dob="1985-02-14", country="CN",
-          programme="SYN-PROLIFERATION", is_true_designation=False,
-          note="same DOB as SYN-0103 with reversed order — tests that name order and "
-               "identity are not conflated"),
-    Entry(entry_id="SYN-0204", name="Mohammed Ali", dob="1979-03-11", country="EG",
-          programme="SYN-TERRORISM", is_true_designation=False,
-          note="shares SYN-0101's DOB and a partial name; the classic false positive"),
-    Entry(entry_id="SYN-0205", name="Ivan Sokolov", dob="1991-08-22", country="RU",
-          programme="SYN-RUSSIA", is_true_designation=False,
-          note="name substring of SYN-0004, different DOB — must not confirm"),
-    Entry(entry_id="SYN-0206", name="J. M. Fernandez", dob=None, country="MX",
-          programme="SYN-VENEZUELA", is_true_designation=False,
-          note="initials only, no DOB — cannot be disambiguated, so must never CONFIRM"),
-    Entry(entry_id="SYN-0207", name="Dmitri Volkov", dob="1994-10-05", country="UA",
-          programme="SYN-RUSSIA", is_true_designation=False,
-          note="exact name match to SYN-0001 with a 26-year DOB gap; name alone is "
-               "insufficient evidence"),
+# --------------------------------------------------------------------- collision seeds
+# Listings that exist to be collided with. Neither is a decoy: both are ordinary designations. What
+# makes them interesting is who they collide with — see `NAMESAKE_APPLICANTS` below.
+COLLISION_SEEDS: tuple[Entry, ...] = (
+    Entry(entry_id="SYN-0006", name="David Smith", dob="1958-03-19", country="GB",
+          programme="SYN-CORRUPTION",
+          note="an extremely common name on the list, so most applicants who share it are "
+               "someone else; only the date of birth tells them apart"),
+    # R27.5. Real listings often lack a date of birth. With none, an overlapping name can be neither
+    # confirmed nor excluded, and the only defensible answer is a human. Presenter B's demo persona,
+    # Avery Quinn Hale, collides with this listing by design.
+    Entry(entry_id="SYN-0106", name="Avery Hale", dob=None, country="US",
+          programme="SYN-CYBER", aliases=("A. Q. Hale",),
+          note="no date of birth on the listing: a name overlap cannot be corroborated or "
+               "excluded, so it routes to review"),
 )
 
-ALL_ENTRIES: tuple[Entry, ...] = (
-    EXACT_MATCH_SEEDS + FUZZY_SEEDS + FALSE_POSITIVE_DECOYS)
+#: The list the screening tool actually consults. Every entry is a designation. An earlier version
+#: also carried "decoys" here — entries flagged `is_true_designation=False` — but no screening list
+#: contains entries that are secretly not designations, and the matcher (rightly) never read the
+#: flag, so a decoy could CONFIRM. The collisions they were meant to exercise are now modelled from
+#: the correct side: as innocent applicants, below.
+ALL_ENTRIES: tuple[Entry, ...] = EXACT_MATCH_SEEDS + FUZZY_SEEDS + COLLISION_SEEDS
+
+
+# --------------------------------------------------------------------- namesake applicants
+@dataclass(frozen=True, kw_only=True)
+class NamesakeApplicant:
+    """An innocent applicant whose name resembles a designation. B-08: 90-95% of real screening
+    alerts are this person. Every one must be cleared by the matcher without a human, either
+    because the names do not overlap enough to alert or because both dates of birth are known and
+    differ, which is an exclusion rather than a weak match."""
+
+    fixture_id: str
+    name: str
+    dob: str
+    country: str
+    #: The listing the name resembles, or None when it resembles nothing on the list.
+    resembles: str | None
+    #: True when the clearance should be an explicit, reported exclusion rather than silence.
+    expect_exclusion: bool
+    note: str = ""
+
+
+NAMESAKE_APPLICANTS: tuple[NamesakeApplicant, ...] = (
+    NamesakeApplicant(fixture_id="NS-0201", name="David Smith", dob="1980-01-01", country="GB",
+                      resembles="SYN-0006", expect_exclusion=True,
+                      note="same common name as the listing, 22 years apart"),
+    NamesakeApplicant(fixture_id="NS-0202", name="Maria Garcia", dob="1977-04-04", country="ES",
+                      resembles=None, expect_exclusion=False,
+                      note="common name, nothing on the list"),
+    NamesakeApplicant(fixture_id="NS-0203", name="Wei Zhang", dob="1992-06-30", country="CN",
+                      resembles="SYN-0103", expect_exclusion=True,
+                      note="the listed name in the other order is the same name; only the date "
+                           "of birth separates them"),
+    NamesakeApplicant(fixture_id="NS-0204", name="Mohammed Ali", dob="1979-03-11", country="EG",
+                      resembles="SYN-0101", expect_exclusion=False,
+                      note="shares a first name and the date of birth with SYN-0101, but not "
+                           "enough of the name to alert"),
+    NamesakeApplicant(fixture_id="NS-0205", name="Ivan Sokolov", dob="1991-08-22", country="RU",
+                      resembles="SYN-0004", expect_exclusion=True,
+                      note="name is a subset of SYN-0004's, dates of birth differ"),
+    NamesakeApplicant(fixture_id="NS-0206", name="J. M. Fernandez", dob="1983-04-09", country="MX",
+                      resembles="SYN-0102", expect_exclusion=False,
+                      note="initials do not overlap the listed given names"),
+    NamesakeApplicant(fixture_id="NS-0207", name="Dmitri Volkov", dob="1994-10-05", country="UA",
+                      resembles="SYN-0001", expect_exclusion=True,
+                      note="exact name match to SYN-0001 with a 26-year gap in dates of birth; the "
+                           "Act 2 namesake"),
+)
 
 
 # --------------------------------------------------------------------- PEP data

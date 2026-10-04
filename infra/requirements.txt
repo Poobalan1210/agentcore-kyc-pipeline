@@ -12,3 +12,9 @@ botocore==1.43.67
 # irreversible properties (Object Lock at creation) are checked before a deploy.
 pytest==8.4.2
 pytest-cov==6.2.1
+
+# Tests only. Parses and evaluates every JSONata expression in the state machines, so a syntax
+# error or a read of an unassigned variable fails `make test` instead of a live execution. A
+# port of the reference implementation (Apache-2.0); Step Functions' own extensions ($parse,
+# $uuid) are supplied by the test.
+jsonata-python==0.7.0

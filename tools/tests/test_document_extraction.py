@@ -197,6 +197,16 @@ class TestUnreadableIsAFindingNotAnOutage:
         assert "could not be fetched" in result["unreadableReason"]
 
 
+@pytest.fixture
+def doc_aws(aws):
+    """The shared case-store fake plus S3 and Textract, with one applicant on file."""
+    aws.boto3.clients["s3"] = FakeS3(metadata={"documenttype": "PASSPORT",
+                                               "issuingcountry": "US", "synthetic": "true"})
+    aws.boto3.clients["textract"] = FakeTextract()
+    aws.seed("APP-1")
+    return aws
+
+
 class TestPersistence:
     """The verified extraction is written straight to the case record, bypassing the model.
 
@@ -205,95 +215,68 @@ class TestPersistence:
     Routing it through the agent's own finding would turn a checkable fact into a paraphrase.
     """
 
-    def test_extraction_is_persisted_when_the_applicant_id_is_supplied(self, monkeypatch):
-        recorded = []
-
-        class FakeDynamo:
-            def update_item(self, **kwargs):
-                recorded.append(kwargs)
-                return {}
-
-        fake_textract = FakeTextract()
-        fake_s3 = FakeS3()
-        fake_ddb = FakeDynamo()
-
-        class M:
-            @staticmethod
-            def client(name, **kw):
-                return {"s3": fake_s3, "textract": fake_textract, "dynamodb": fake_ddb}[name]
-
-        monkeypatch.setitem(sys.modules, "boto3", M())
-        monkeypatch.setenv("CASE_TABLE", "kyc90-cases")
-
-        s3_get_document({"bucket": "b", "key": "k", "applicantId": "APP-1"}, {})
-
-        assert len(recorded) == 1
-        call = recorded[0]
-        assert call["Key"]["applicantId"] == {"S": "APP-1"}
-        assert call["ExpressionAttributeNames"]["#e"] == "documentExtraction"
-        stored = json.loads(call["ExpressionAttributeValues"][":e"]["S"])
+    def test_the_document_listed_on_the_case_is_read_and_recorded(self, doc_aws):
+        result = s3_get_document({"applicantId": "APP-1"}, {})
+        assert result.status is Status.OK
+        stored = doc_aws.ddb.fact("APP-1", "documentExtraction")
+        assert stored["performed"] is True
         assert stored["mrz"]["surname"] == "REEVES"
         assert stored["mrz"]["checkDigitsValid"] is True
+        assert stored["document"]["key"] == "APP-1/PASSPORT-1"
+        assert stored["document"]["synthetic"] is True
 
-    def test_no_applicant_id_still_returns_the_extraction(self, monkeypatch):
-        """Best effort: the tool's schema does not require `applicantId`, so an agent that omits it
-        must still get its extraction back. The cross-check then reports `performed: False`, which
-        is visible in the audit record rather than silently absent."""
-        fake_textract = FakeTextract()
-        fake_s3 = FakeS3()
+    def test_a_document_not_on_the_case_is_refused(self, doc_aws):
+        """A steered agent cannot substitute a clean document for the applicant's own."""
+        result = s3_get_document(
+            {"applicantId": "APP-1", "bucket": "b", "key": "someone-elses-passport"}, {})
+        assert result.status is Status.INVALID
+        assert result.reason_code == "DOCUMENT_NOT_ON_CASE"
+        assert doc_aws.ddb.fact("APP-1", "documentExtraction") is None
 
-        class M:
-            @staticmethod
-            def client(name, **kw):
-                return {"s3": fake_s3, "textract": fake_textract}[name]
+    def test_a_listed_document_can_be_named_explicitly(self, doc_aws):
+        result = s3_get_document({"applicantId": "APP-1", "bucket": doc_aws.EVIDENCE_BUCKET,
+                                  "key": "APP-1/PASSPORT-1"}, {})
+        assert result.status is Status.OK
 
-        monkeypatch.setitem(sys.modules, "boto3", M())
-        monkeypatch.delenv("CASE_TABLE", raising=False)
+    def test_the_intake_document_type_wins_over_the_agents(self, doc_aws):
+        s3_get_document({"applicantId": "APP-1", "documentType": "NATIONAL_ID"}, {})
+        stored = doc_aws.ddb.fact("APP-1", "documentExtraction")
+        assert stored["document"]["documentType"] == "PASSPORT"
 
+    def test_no_applicant_id_is_refused(self, doc_aws):
         result = s3_get_document({"bucket": "b", "key": "k"}, {})
+        assert result.status is Status.INVALID
+        assert result.reason_code == "MISSING_APPLICANT"
+
+    def test_a_persistence_failure_fails_the_read(self, doc_aws):
+        """Mandatory, not best effort, now that the rules read only what was recorded: an
+        extraction the rules cannot see is a check that did not happen, and must surface as
+        UNAVAILABLE rather than as a success the agent reports and the rules never read."""
+        doc_aws.ddb.fail_updates = "ProvisionedThroughputExceededException"
+        with pytest.raises(ToolError) as excinfo:
+            s3_get_document({"applicantId": "APP-1"}, {})
+        assert excinfo.value.reason_code == "FACT_NOT_RECORDED"
+
+    def test_a_textract_outage_is_recorded_as_not_performed(self, doc_aws):
+        doc_aws.boto3.clients["textract"] = FakeTextract(error=AwsError("ThrottlingException"))
+        with pytest.raises(ToolError):
+            s3_get_document({"applicantId": "APP-1"}, {})
+        stored = doc_aws.ddb.fact("APP-1", "documentExtraction")
+        assert stored["performed"] is False
+        assert stored["reasonCode"] == "TEXTRACT_UNAVAILABLE"
+
+    def test_an_unreadable_document_is_still_a_recorded_finding(self, doc_aws):
+        doc_aws.boto3.clients["s3"] = FakeS3(content_type="application/pdf")
+        result = s3_get_document({"applicantId": "APP-1"}, {})
         assert result.status is Status.OK
-        assert result.data["mrz"]["surname"] == "REEVES"
-
-    def test_a_persistence_failure_does_not_fail_the_document_read(self, monkeypatch):
-        """Unlike a lost agent finding, a missing cross-check is a degraded control rather than a
-        lost result. Failing the tool call would turn that into a failed document read, which is
-        strictly worse — the agent would report the document as unavailable."""
-        class ExplodingDynamo:
-            def update_item(self, **kwargs):
-                raise AwsError("ProvisionedThroughputExceededException")
-
-        fake_textract = FakeTextract()
-        fake_s3 = FakeS3()
-        fake_ddb = ExplodingDynamo()
-
-        class M:
-            @staticmethod
-            def client(name, **kw):
-                return {"s3": fake_s3, "textract": fake_textract, "dynamodb": fake_ddb}[name]
-
-        monkeypatch.setitem(sys.modules, "boto3", M())
-        monkeypatch.setenv("CASE_TABLE", "kyc90-cases")
-
-        result = s3_get_document({"bucket": "b", "key": "k", "applicantId": "APP-1"}, {})
-        assert result.status is Status.OK
-        assert result.data["mrz"]["surname"] == "REEVES"
+        stored = doc_aws.ddb.fact("APP-1", "documentExtraction")
+        assert stored["performed"] is True
+        assert stored["documentReadable"] is False
 
 
 class TestToolEnvelope:
-    def test_extraction_is_merged_into_the_tool_result(self, monkeypatch):
-        """The Documents agent already calls `s3_get_document`, so extending it rather than adding
-        an eighth tool keeps the agent unchanged — and keeps `EVIDENCE_TOOLS` at seven, which the
-        module asserts and the talk describes."""
-        fake = FakeTextract()
-        monkeypatch.setitem(
-            sys.modules, "boto3",
-            type("M", (), {"client": staticmethod(lambda name, **kw: (
-                FakeS3(metadata={"documenttype": "PASSPORT", "issuingcountry": "US",
-                                 "synthetic": "true"})
-                if name == "s3" else fake))})())
-
-        result = s3_get_document(
-            {"bucket": "b", "key": "k", "documentType": "PASSPORT"}, {})
+    def test_extraction_is_merged_into_the_tool_result(self, doc_aws):
+        result = s3_get_document({"applicantId": "APP-1"}, {})
         assert result.status is Status.OK
         payload = json.loads(json.dumps(result.data))
         # Both halves present: the metadata stamped at upload and the fields read off the image.
@@ -301,3 +284,4 @@ class TestToolEnvelope:
         assert payload["metadata"]["issuingcountry"] == "US"
         assert payload["mrz"]["surname"] == "REEVES"
         assert payload["documentReadable"] is True
+        assert payload["recorded"] is True

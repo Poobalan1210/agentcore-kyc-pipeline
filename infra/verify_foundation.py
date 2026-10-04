@@ -5,7 +5,10 @@ A gate is not passed by absence of error; it is passed by producing the stated e
 So this does not check that the stack deployed. It checks the two things that would be
 catastrophic and invisible if wrong:
 
-  * Object Lock actually refuses a delete. Compliance mode is only real if a delete fails.
+  * Object Lock actually refuses a delete. Compliance mode is only real if a delete fails. It
+    writes a probe to each evidence bucket to prove it: under COMPLIANCE that probe can never be
+    deleted for seven years; under the demo's GOVERNANCE lock it is removed again with the
+    bypass, which proves the demo's evidence stays removable.
   * The ten roles hold only their intended permissions — every harness role denies the
     tool-bypass action, and the state machine role grants the one action the Step Functions
     integration needs (F-70 versus R11.7, which are one word apart).
@@ -14,12 +17,19 @@ catastrophic and invisible if wrong:
 from __future__ import annotations
 
 import json
+import os
 import sys
 import uuid
 
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+
+from kyc.config import EVIDENCE_LOCKS
+
+#: The lock the deployment was made with (`make verify` passes the same one `make deploy` used).
+#: COMPLIANCE when unset, so a bare run holds the account to the regulated posture.
+EXPECTED_LOCK = EVIDENCE_LOCKS[(os.environ.get("EVIDENCE_LOCK") or "COMPLIANCE").upper()]
 
 REGION = "us-east-1"
 CFG = Config(region_name=REGION, retries={"max_attempts": 3})
@@ -30,7 +40,7 @@ kms = boto3.client("kms", config=CFG)
 
 ACCOUNT = boto3.client("sts", config=CFG).get_caller_identity()["Account"]
 JURISDICTIONS = ("us", "uk", "au", "jp")
-AGENTS = ("router", "documents", "identity", "fraud", "prescreen", "compliance", "notify")
+AGENTS = ("briefing", "documents", "identity", "fraud", "prescreen", "compliance", "notify")
 
 results: list[tuple[str, bool, str]] = []
 
@@ -56,9 +66,10 @@ for j in JURISDICTIONS:
         rule = cfg["Rule"]["DefaultRetention"]
         check(f"{j}: Object Lock enabled",
               cfg.get("ObjectLockEnabled") == "Enabled", str(cfg.get("ObjectLockEnabled")))
-        check(f"{j}: COMPLIANCE mode", rule["Mode"] == "COMPLIANCE", rule["Mode"])
-        check(f"{j}: 7-year retention", rule.get("Days") == 2555,
-              f"{rule.get('Days')} days")
+        check(f"{j}: {EXPECTED_LOCK.mode} mode ({EXPECTED_LOCK.name})",
+              rule["Mode"] == EXPECTED_LOCK.mode, rule["Mode"])
+        check(f"{j}: {EXPECTED_LOCK.days}-day default retention",
+              rule.get("Days") == EXPECTED_LOCK.days, f"{rule.get('Days')} days")
     except ClientError as e:
         check(f"{j}: Object Lock configuration readable", False,
               e.response["Error"]["Code"])
@@ -84,6 +95,19 @@ for j in JURISDICTIONS:
         code = e.response["Error"]["Code"]
         check(f"{j}: DELETE of locked version is refused",
               code in ("AccessDenied", "InvalidRequest"), code)
+
+    if EXPECTED_LOCK.mode == "GOVERNANCE":
+        # The demo's promise is the other half: an administrator can remove what it wrote. So
+        # prove it on the probe, which also leaves nothing of this run behind.
+        try:
+            s3.delete_object(Bucket=bucket, Key=key, VersionId=version,
+                             BypassGovernanceRetention=True)
+            check(f"{j}: admin can remove it with the governance bypass", True,
+                  "probe deleted")
+        except ClientError as e:
+            check(f"{j}: admin can remove it with the governance bypass", False,
+                  e.response["Error"]["Code"])
+        continue
 
     # A delete marker is still allowed and is not a deletion; make that explicit so nobody
     # mistakes it for one.

@@ -47,8 +47,8 @@ Do not add `@aws-cdk/aws-bedrock-agentcore-alpha` or the CLI constructs. Mixing 
 Python for the CDK app, every Lambda handler, the decision engine, the router, the account
 stub, the evaluators and all tests. `aws-cdk-lib` for Python, `pytest`, `boto3`.
 
-React appears in exactly three places — the Applicant Client App, the Reviewer Console and the
-Demo Panel — because Face Liveness requires the Amplify JS SDK and `FaceLivenessDetector` is a
+React appears in exactly one place — the console (`frontend/apps/console`: the applicant flow,
+review queue and demo controls) — because Face Liveness requires the Amplify JS SDK and `FaceLivenessDetector` is a
 React component (F-42). Claiming "Python only" without that carve-out would be a claim that
 breaks on contact with the liveness requirement. No other language enters the repo.
 
@@ -79,7 +79,8 @@ make install     # venv + pinned deps
 make test        # 20 assertions against the synthesised template
 make synth
 make stage1      # deploy KycFoundation
-make verify      # 61 assertions against the live account
+make verify      # assertions against the live account. Writes a probe object to each evidence
+                 # bucket: removed again under the DEMO lock, kept 7 years under COMPLIANCE
 ```
 
 ## Two things here cannot be undone

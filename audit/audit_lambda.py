@@ -177,6 +177,10 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
         case_record=case,
         evidence=evidence,
         outcome=decision,
+        # The reviewer's identity when a person decided (the state machine passes it from the
+        # review resume payload); `system` when the rules did. R6.3 needs the difference on the
+        # immutable record, not only on the case, which is mutable.
+        actor=str(event.get("actor") or "system"),
         versions=VersionPins(
             harness_version=str(event.get("harnessVersion")
                                 or os.environ.get("HARNESS_VERSION", "")),
@@ -197,6 +201,9 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
             float(event["ingressLatencyMs"])
             if isinstance(event.get("ingressLatencyMs"), (int, float)) else None
         ),
+        # The state machine sends its execution name as `traceId`; it is not an OTEL trace id
+        # (see `_otel_trace_id`), but it is exactly what leads back to the execution timeline.
+        execution_name=str(event.get("traceId") or "") or None,
     )
 
     if isinstance(record, IncompleteRecord):
@@ -208,6 +215,11 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
             % (applicant_id, phase,
                ", ".join(r.value for r in record.reasons), list(record.missing)))
 
+    # Set by the stack from the deployment's evidence lock (D-35). Unset means the regulated
+    # default: COMPLIANCE for seven years, never the demo's one day by accident.
+    retention_days = os.environ.get("AUDIT_RETENTION_DAYS")
     put_decision_record(
-        record, bucket=bucket, decided_at=decided_at, kms_key_id=kms_key_id)
+        record, bucket=bucket, decided_at=decided_at, kms_key_id=kms_key_id,
+        lock_mode=os.environ.get("AUDIT_LOCK_MODE") or "COMPLIANCE",
+        retention_days=float(retention_days) if retention_days else None)
     return {"decisionId": record.decision_id, "applicantId": applicant_id, "phase": phase}

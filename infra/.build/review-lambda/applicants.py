@@ -13,12 +13,26 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import uuid
 from typing import Any, Mapping
+
+import auth
+import notifications
 
 LOG = logging.getLogger(__name__)
 if not LOG.handlers:
     LOG.setLevel(logging.INFO)
+
+#: At most this many documents per submission. The tools read the first; more is never needed and
+#: an unbounded list is an unbounded write into the case record.
+MAX_DOCUMENTS = 3
+
+#: The states in which an applicant may resubmit. Everything else is either in progress, with a
+#: person, or decided — a second submission there would race the first.
+CONTINUABLE_STATES = ("AWAITING_APPLICANT",)
+
+_DOCUMENT_TYPE = re.compile(r"[^A-Za-z0-9_]")
 
 #: Jurisdiction -> evidence bucket env var name, mirroring `foundation_stack.py`'s per-
 #: jurisdiction buckets. Kept as an explicit map (not a format string) so an unsupported
@@ -57,7 +71,9 @@ def presign_document(event: Mapping[str, Any], _context: Any = None) -> dict[str
     """
     body = _body(event)
     jurisdiction = str(body.get("jurisdiction") or "").lower()
-    document_type = str(body.get("documentType") or "")
+    # Into an S3 key, so letters, digits and underscore only. A `/` here could place an upload
+    # under the decision records' `{applicantId}/{phase}/` prefix in the same bucket.
+    document_type = _DOCUMENT_TYPE.sub("", str(body.get("documentType") or ""))[:32]
     content_type = str(body.get("contentType") or "application/octet-stream")
     checksum_sha256 = str(body.get("checksumSha256") or "")
     applicant_id = applicant_id_from(event, body)
@@ -124,12 +140,24 @@ def presign_document(event: Mapping[str, Any], _context: Any = None) -> dict[str
 
 def create_applicant(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]:
     """`POST /applicants`. Body: `{"jurisdiction": "us", "productApplied": "current_account",
+    "applicationId": "...", "declaredIdentity": {...},
     "documents": [{"bucket": ..., "key": ..., "type": "PASSPORT", "issuingCountry": "US"}]}`.
 
-    This is the applicant-facing half of task 7.1-7.3's ingress path — it writes the same case
-    record shape `spike/live_run.py` seeds (jurisdiction, documents, gatewayArn) and enqueues on
-    the real `kyc90-applicants.fifo` queue, so a submission through this endpoint takes the
-    identical path already live-verified this session (`NormalizeInput` → `LoadCase` → ...).
+    Writes the case record and enqueues the applicant on the real ingress queue, so a submission
+    through this endpoint takes the identical path the pipeline was proven on (`NormalizeInput` ->
+    `LoadCase` -> ...).
+
+    Three outcomes for a case that already exists:
+
+    * **AWAITING_APPLICANT** — the applicant was asked for something (a clearer document, another
+      liveness check). This is the continuation: the previous Phase 1 decision moves into
+      `phase1History`, the case returns to RECEIVED with a new event id, and Phase 1 runs again
+      on the new evidence. The facts the tools recorded last time are older than the new run, so
+      the rules ignore them.
+    * **any other state** — 409. The case is in progress, with a reviewer, or decided, and a second
+      submission would race the first.
+    * **liveness only** — the liveness endpoint creates the item before this call; that is not a
+      case yet, and intake proceeds normally.
     """
     body = _body(event)
     jurisdiction = str(body.get("jurisdiction") or "").lower()
@@ -137,80 +165,167 @@ def create_applicant(event: Mapping[str, Any], _context: Any = None) -> dict[str
         return _response(400, {"error": "UNSUPPORTED_JURISDICTION", "jurisdiction": jurisdiction})
 
     applicant_id = applicant_id_from(event, body) or f"APP-{uuid.uuid4().hex[:12].upper()}"
-    event_id = f"EVT-{uuid.uuid4().hex[:12].upper()}"
     documents = body.get("documents") or []
     if not isinstance(documents, list) or not documents:
         return _response(400, {"error": "NO_DOCUMENTS"})
+    if len(documents) > MAX_DOCUMENTS:
+        return _response(400, {"error": "TOO_MANY_DOCUMENTS", "limit": MAX_DOCUMENTS})
 
-    account = os.environ.get("AWS_ACCOUNT_ID", "")
-    region = os.environ.get("AWS_REGION", "us-east-1")
+    # Only documents this applicant uploaded, through this API, to this jurisdiction's bucket.
+    # The tools read whatever the case lists, so a case that could list another applicant's object
+    # could be screened against someone else's passport.
+    bucket = os.environ.get(_BUCKET_ENV_BY_JURISDICTION[jurisdiction], "")
+    for document in documents:
+        if not isinstance(document, Mapping):
+            return _response(400, {"error": "MALFORMED_DOCUMENT"})
+        if (str(document.get("bucket") or "") != bucket
+                or not str(document.get("key") or "").startswith(f"{applicant_id}/")):
+            return _response(403, {"error": "DOCUMENT_NOT_OWNED"})
 
     import boto3
     from datetime import datetime, timezone
 
     ddb = boto3.client("dynamodb")
-    # `update_item`, not `put_item`, and the guard is on `caseId` rather than `applicantId`.
-    #
-    # The liveness result is written to this same item *before* this endpoint is ever called —
-    # F-40 gives a 3-minute window in which the Rekognition session still exists, so
-    # `liveness.py` persists immediately rather than waiting for the applicant to finish
-    # uploading documents (R33.5). That write creates the item. A `put_item` would therefore
-    # either overwrite the liveness evidence, or, with `attribute_not_exists(applicantId)`, fail
-    # outright — which is exactly what happened: every case reached Phase 1 with no liveness
-    # attribute and `CheckPreconditions` correctly emitted STEP_UP / LIVENESS_REQUIRED.
-    #
-    # `attribute_not_exists(caseId)` keeps the property that actually matters (R21.4: a retry must
-    # not clobber an in-flight or decided case) because `caseId` is written here and nowhere else,
-    # so its presence means "this case has already been intaken" — while still tolerating an item
-    # that so far holds nothing but liveness evidence.
-    ddb.update_item(
-        TableName=os.environ["CASE_TABLE_NAME"],
-        Key={"applicantId": {"S": applicant_id}, "sk": {"S": "CASE"}},
-        UpdateExpression=(
-            "SET caseId = :caseId, #state = :state, createdAt = :createdAt, "
-            "jurisdiction = :jurisdiction, productApplied = :productApplied, "
-            "policyEngineVersion = :policyEngineVersion, gatewayArn = :gatewayArn, "
-            "documents = :documents, declaredIdentity = :declaredIdentity"
-        ),
-        ExpressionAttributeNames={"#state": "state"},
-        ExpressionAttributeValues={
-            ":declaredIdentity": _declared_identity_attr(body.get("declaredIdentity")),
-            ":caseId": {"S": f"CASE-{applicant_id}"},
-            ":state": {"S": "RECEIVED"},
-            ":createdAt": {"S": datetime.now(timezone.utc).isoformat()},
-            ":jurisdiction": {"S": jurisdiction},
-            ":productApplied": {"S": str(body.get("productApplied") or "current_account")},
-            ":policyEngineVersion": {"S": "1"},
-            ":gatewayArn": {"S": (
-                f"arn:aws:bedrock-agentcore:{region}:{account}:"
-                f"gateway/kycgateway-{jurisdiction}")},
-            ":documents": {"L": [
-                {"M": {
-                    "type": {"S": str(d.get("type") or "")},
-                    "key": {"S": str(d.get("key") or "")},
-                    "bucket": {"S": str(d.get("bucket") or "")},
-                    "issuingCountry": {"S": str(d.get("issuingCountry") or "")},
-                }} for d in documents
-            ]},
-        },
-        ConditionExpression="attribute_not_exists(caseId)",
-    )
+    table = os.environ["CASE_TABLE_NAME"]
+    key = {"applicantId": {"S": applicant_id}, "sk": {"S": "CASE"}}
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    event_id = f"EVT-{uuid.uuid4().hex[:12].upper()}"
+    documents_attr = {"L": [
+        {"M": {
+            "type": {"S": _DOCUMENT_TYPE.sub("", str(d.get("type") or ""))[:32]},
+            "key": {"S": str(d.get("key") or "")},
+            "bucket": {"S": str(d.get("bucket") or "")},
+            "issuingCountry": {"S": str(d.get("issuingCountry") or "")[:3].upper()},
+        }} for d in documents
+    ]}
+    declared = _declared_identity_attr(body.get("declaredIdentity"))
 
-    sqs = boto3.client("sqs")
-    sqs.send_message(
-        QueueUrl=os.environ["APPLICANTS_QUEUE_URL"],
-        MessageBody=json.dumps({"applicantId": applicant_id, "eventId": event_id}),
-        MessageGroupId=applicant_id,
-    )
+    # `update_item`, not `put_item`, and the guard is on `caseId` rather than `applicantId`: the
+    # liveness result is written to this item *before* this endpoint runs (F-40's three-minute
+    # window), so the item can already exist holding nothing but liveness evidence. `caseId` is
+    # written here and nowhere else, so its absence is the real "not yet intaken" signal (R21.4).
+    try:
+        ddb.update_item(
+            TableName=table,
+            Key=key,
+            UpdateExpression=(
+                "SET caseId = :caseId, #state = :state, createdAt = :createdAt, "
+                "jurisdiction = :jurisdiction, productApplied = :productApplied, "
+                "documents = :documents, declaredIdentity = :declaredIdentity, "
+                "lastEventId = :eventId, "
+                "transitions = list_append(if_not_exists(transitions, :empty), :tr)"),
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":declaredIdentity": declared,
+                ":caseId": {"S": f"CASE-{applicant_id}"},
+                ":state": {"S": "RECEIVED"},
+                ":createdAt": {"S": now},
+                ":jurisdiction": {"S": jurisdiction},
+                ":productApplied": {"S": str(body.get("productApplied") or "current_account")},
+                ":documents": documents_attr,
+                ":eventId": {"S": event_id},
+                ":empty": {"L": []},
+                ":tr": _transition("NONE", "RECEIVED", now, "application submitted", event),
+            },
+            ConditionExpression="attribute_not_exists(caseId)",
+        )
+    except Exception as exc:  # noqa: BLE001 - narrowed immediately by error code
+        if _error_code(exc) != "ConditionalCheckFailedException":
+            raise
+        resubmitted = _continue_case(ddb, table=table, key=key, applicant_id=applicant_id,
+                                     event_id=event_id, documents=documents_attr,
+                                     declared=declared, now=now, event=event)
+        if resubmitted is not None:
+            return resubmitted
 
+    _enqueue(boto3, applicant_id, event_id)
     LOG.info("applicant enqueued applicantId=%s jurisdiction=%s", applicant_id, jurisdiction)
     return _response(202, {"applicantId": applicant_id, "eventId": event_id})
 
 
+def _continue_case(ddb: Any, *, table: str, key: Mapping[str, Any], applicant_id: str,
+                   event_id: str, documents: Mapping[str, Any], declared: Mapping[str, Any],
+                   now: str, event: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Resubmission after a step-up. Returns a response to send, or None to go on and enqueue.
+
+    The previous attempt is kept, not overwritten: its decision, any review of it and the identity
+    it was decided on move into `phase1History`, so a reviewer of the new attempt can see the old
+    one, including a changed name or date of birth. The review slot is cleared because a new
+    attempt can be reviewed afresh; first-writer-wins applies per attempt.
+    """
+    current = ddb.get_item(TableName=table, Key=key, ConsistentRead=True).get("Item") or {}
+    state = _s(current.get("state")) or "UNKNOWN"
+    if state not in CONTINUABLE_STATES:
+        return _response(409, {"error": "CASE_ALREADY_SUBMITTED", "state": state,
+                               "applicantId": applicant_id})
+
+    previous = {"M": {
+        "phase1": current.get("phase1") or {"NULL": True},
+        "phase1Review": current.get("phase1Review") or {"NULL": True},
+        "declaredIdentity": current.get("declaredIdentity") or {"NULL": True},
+        "documents": current.get("documents") or {"L": []},
+        "eventId": current.get("lastEventId") or {"NULL": True},
+        "closedAt": {"S": now},
+    }}
+    try:
+        ddb.update_item(
+            TableName=table,
+            Key=key,
+            UpdateExpression=(
+                "SET #state = :received, documents = :documents, "
+                "declaredIdentity = :declaredIdentity, lastEventId = :eventId, "
+                "resubmittedAt = :now, "
+                "phase1History = list_append(if_not_exists(phase1History, :empty), :previous), "
+                "transitions = list_append(if_not_exists(transitions, :empty), :tr) "
+                "REMOVE phase1, phase1Review, reviewTaskToken, reviewTaskTokenAt"),
+            ExpressionAttributeNames={"#state": "state"},
+            ExpressionAttributeValues={
+                ":received": {"S": "RECEIVED"},
+                ":awaiting": {"S": state},
+                ":documents": documents,
+                ":declaredIdentity": declared,
+                ":eventId": {"S": event_id},
+                ":now": {"S": now},
+                ":empty": {"L": []},
+                ":previous": {"L": [previous]},
+                ":tr": _transition(state, "RECEIVED", now, "resubmitted after a step-up", event),
+            },
+            # The state read above must still hold: two resubmissions racing each other must not
+            # both enqueue.
+            ConditionExpression="#state = :awaiting",
+        )
+    except Exception as exc:  # noqa: BLE001 - narrowed immediately by error code
+        if _error_code(exc) != "ConditionalCheckFailedException":
+            raise
+        return _response(409, {"error": "CASE_ALREADY_SUBMITTED", "applicantId": applicant_id})
+    return None
+
+
+def _enqueue(boto3: Any, applicant_id: str, event_id: str) -> None:
+    boto3.client("sqs").send_message(
+        QueueUrl=os.environ["APPLICANTS_QUEUE_URL"],
+        MessageBody=json.dumps({"applicantId": applicant_id, "eventId": event_id}),
+        MessageGroupId=applicant_id,
+        # FIFO dedupes on this for five minutes, so a browser retry of one submission is one run.
+        MessageDeduplicationId=event_id,
+    )
+
+
+def _transition(from_state: str, to_state: str, at: str, reason: str,
+                event: Mapping[str, Any]) -> dict[str, Any]:
+    """R2.5 — the applicant is the actor of their own submission."""
+    return {"L": [{"M": {
+        "from": {"S": from_state},
+        "to": {"S": to_state},
+        "at": {"S": at},
+        "actor": {"S": f"applicant:{auth.caller_sub(event) or 'unauthenticated'}"},
+        "reason": {"S": reason},
+    }}]}
+
+
 #: The declared-identity fields stored on the case record. Fixed list rather than "whatever the
-#: client sent": every Phase 1 agent receives the whole case record as its prompt
-#: (`asl.py` passes `$string($case)`), so an unbounded client-supplied map would let a caller
-#: inject arbitrary text straight into an agent's context.
+#: client sent": the declared names reach agent prompts and the screening tool, and an unbounded
+#: client-supplied map would let a caller put arbitrary text in front of a model.
 _DECLARED_FIELDS = ("givenNames", "surname", "dateOfBirth", "nationality", "address")
 
 #: Ceiling per field, for the same reason. Long enough for a real compound name or address.
@@ -220,10 +335,10 @@ _DECLARED_MAX_LEN = 256
 def _declared_identity_attr(declared: Any) -> dict[str, Any]:
     """The applicant's declared identity, as a DynamoDB map.
 
-    This is the input `sanctions_exact_match` needs — it raises `MISSING_NAME` and refuses to run
-    without a name, so before this existed the Phase 1 pre-screen had nothing to screen. It is
-    also the left-hand side of the declared-vs-document comparison, which is a fraud control in
-    its own right.
+    This is the identity `sanctions_screen` screens — it records NO_NAME_ON_RECORD and refuses to
+    run without a name, so without it the Phase 1 screening has nothing to screen. It is also the
+    left-hand side of the declared-vs-document comparison, which is a fraud control in its own
+    right.
 
     Stored even when empty (as an empty map) rather than omitted, so the difference between "the
     applicant declared nothing" and "this case predates the form" is visible on the record instead
@@ -239,12 +354,15 @@ def _declared_identity_attr(declared: Any) -> dict[str, Any]:
 
 
 def get_case(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]:
-    """`GET /cases/{applicantId}`. Returns case state and phase progress, never raw agent
-    prose — `state`, `phase1.outcome` (if present), `phase2Pending`, `ingressLatencyMs`."""
+    """`GET /cases/{applicantId}`. The applicant's own case, or any case for a reviewer or a
+    presenter. Anyone else gets a 404, not a 403, so the route cannot be used to learn which
+    applicant ids exist."""
     path = event.get("pathParameters") or {}
     applicant_id = str(path.get("applicantId") or "")
     if not applicant_id:
         return _response(400, {"error": "MISSING_APPLICANT_ID"})
+    if not auth.may_read(event, applicant_id):
+        return _response(404, {"error": "CASE_NOT_FOUND"})
 
     import boto3
 
@@ -261,25 +379,85 @@ def get_case(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]:
     return _response(200, _project_case(item))
 
 
+#: Case state -> what the applicant is shown. Internal states such as AWAITING_REVIEW are not
+#: secrets, but their names are; "in review" is what a bank would say.
+_APPLICANT_STATES = {
+    "RECEIVED": "SUBMITTED",
+    "IN_PROGRESS": "CHECKING",
+    "AWAITING_APPLICANT": "MORE_INFORMATION_NEEDED",
+    "AWAITING_REVIEW": "IN_REVIEW",
+    "PROVISIONAL": "OPEN_WITH_LIMITS",
+    "MONITORING": "OPEN",
+    "RESTRICTED": "OPEN_WITH_LIMITS",
+    "FROZEN": "ON_HOLD",
+    "DECIDED": "DECLINED",
+}
+
+
 def _project_case(item: Mapping[str, Any]) -> dict[str, Any]:
-    """Only the fields the applicant is entitled to see — never the raw phase1Evidence blob,
-    which carries agent reasoning text (R18.2's audience is auditors, not applicants)."""
-    out: dict[str, Any] = {"state": _s(item.get("state"))}
-    phase1 = item.get("phase1", {}).get("S")
-    if phase1:
-        try:
-            decoded = json.loads(phase1)
-            out["outcome"] = decoded.get("outcome")
-            out["reasonCode"] = decoded.get("reasonCode")
-            out["requiredItem"] = decoded.get("requiredItem")
-        except (json.JSONDecodeError, AttributeError):
-            pass
+    """Only what the applicant is entitled to see.
+
+    Never the agents' words, the facts the tools recorded, the tier or the rule that decided —
+    R18.2's audience is auditors, not applicants — and never a reason that would say why an
+    account is limited (`notifications.py`). Messages are passed through the tipping-off guard on
+    every read, so a guard improvement applies to messages already stored.
+    """
+    state = _s(item.get("state")) or "UNKNOWN"
+    out: dict[str, Any] = {
+        "state": state,
+        "status": _APPLICANT_STATES.get(state, "CHECKING"),
+        "canContinue": state in CONTINUABLE_STATES,
+    }
+    phase1 = _json(item.get("phase1"))
+    if state in CONTINUABLE_STATES:
+        out.update(notifications.applicant_outcome(phase1))
     if "phase2Pending" in item:
         out["phase2Pending"] = _s(item.get("phase2Pending"))
     if "ingressLatencyMs" in item:
         n = item["ingressLatencyMs"]
         out["ingressLatencyMs"] = float(n["N"]) if "N" in n else None
+    liveness = item.get("liveness", {}).get("M") or {}
+    if liveness:
+        out["liveness"] = {"result": _s(liveness.get("result"))}
+    out["notifications"] = notifications.project(_plain_list(item.get("notifications")))
+    # `resubmittedAt` too: after a step-up the attempt being decided started then, not at
+    # `createdAt`, and the applicant's screen times the decision from whichever is later.
+    for stamp in ("createdAt", "resubmittedAt", "provisionalDecidedAt", "fullDecidedAt"):
+        if stamp in item:
+            out[stamp] = _s(item.get(stamp))
     return out
+
+
+def _json(attr: Any) -> dict[str, Any] | None:
+    raw = attr.get("S") if isinstance(attr, Mapping) else None
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _plain_list(attr: Any) -> list[dict[str, Any]]:
+    """A DynamoDB list of flat string maps -> plain dicts."""
+    if not isinstance(attr, Mapping) or not isinstance(attr.get("L"), list):
+        return []
+    out = []
+    for entry in attr["L"]:
+        fields = entry.get("M") if isinstance(entry, Mapping) else None
+        if isinstance(fields, Mapping):
+            out.append({k: _s(v) for k, v in fields.items()})
+    return out
+
+
+def _error_code(exc: Exception) -> str:
+    response = getattr(exc, "response", None)
+    if isinstance(response, Mapping):
+        error = response.get("Error")
+        if isinstance(error, Mapping):
+            return str(error.get("Code", ""))
+    return type(exc).__name__
 
 
 def _s(attr: Any) -> str | None:
@@ -324,19 +502,7 @@ def applicant_id_from(event: Mapping[str, Any], body: Mapping[str, Any]) -> str:
 
 
 def _claims(event: Mapping[str, Any]) -> Mapping[str, Any]:
-    context = event.get("requestContext")
-    if not isinstance(context, Mapping):
-        return {}
-    authorizer = context.get("authorizer")
-    if not isinstance(authorizer, Mapping):
-        return {}
-    jwt = authorizer.get("jwt")
-    if isinstance(jwt, Mapping) and isinstance(jwt.get("claims"), Mapping):
-        return jwt["claims"]
-    claims = authorizer.get("claims")
-    if isinstance(claims, Mapping):
-        return claims
-    return {}
+    return auth.claims(event)
 
 
 def _body(event: Mapping[str, Any]) -> Mapping[str, Any]:

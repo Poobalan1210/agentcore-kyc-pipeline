@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Phase 3 + 4 verification — GATE G7.
 
-Four Gateways, seven targets each, a policy engine attached LOG_ONLY, and rate limits present.
+Usage: `python verify_gateways.py [LOG_ONLY|ENFORCE]` (default LOG_ONLY).
+
+Four Gateways, six targets each, a policy engine attached in the expected mode, and rate limits.
 Also records the exact Cedar action names, because Phase 8's policy files depend on them and
 F-35's three underscores are the easiest thing in this build to get wrong.
 """
@@ -18,8 +20,12 @@ REGION = "us-east-1"
 ctl = boto3.client("bedrock-agentcore-control",
                    config=Config(region_name=REGION, retries={"max_attempts": 3}))
 
-EXPECTED_TARGETS = {"DocumentStore", "FaceCompare", "VelocityStore", "SanctionsExact",
-                    "SanctionsFuzzy", "PepList", "AdverseMedia"}
+EXPECTED_TARGETS = {"DocumentStore", "FaceCompare", "VelocityStore", "SanctionsScreen",
+                    "PepList", "AdverseMedia"}
+#: What the Gateways should be attached in. Pass `ENFORCE` once the logged decisions have been
+#: checked (`scripts/check_policy_decisions.py`) and the stack redeployed with
+#: `-c policyEnforcement=ENFORCE`.
+EXPECTED_MODE = (sys.argv[1] if len(sys.argv) > 1 else "LOG_ONLY").upper()
 JURISDICTIONS = ("US", "UK", "AU", "JP")
 
 results: list[tuple[str, bool, str]] = []
@@ -63,14 +69,14 @@ for j in JURISDICTIONS:
           proto.get("searchType") == "SEMANTIC", str(proto.get("searchType")))
 
     pe = full.get("policyEngineConfiguration") or {}
-    check(f"{name} policy engine attached LOG_ONLY",
-          pe.get("mode") == "LOG_ONLY", "mode=%s" % pe.get("mode"))
+    check(f"{name} policy engine attached {EXPECTED_MODE}",
+          pe.get("mode") == EXPECTED_MODE, "mode=%s" % pe.get("mode"))
 
     tgts = ctl.list_gateway_targets(gatewayIdentifier=gid)["items"]
     names = {t["name"] for t in tgts}
-    check(f"{name} has all seven targets",
+    check(f"{name} has all six targets",
           names == EXPECTED_TARGETS,
-          "%d: %s" % (len(names), sorted(names)) if names != EXPECTED_TARGETS else "7")
+          "%d: %s" % (len(names), sorted(names)) if names != EXPECTED_TARGETS else "6")
     not_ready = [t["name"] for t in tgts if t.get("status") not in ("READY", "ACTIVE")]
     check(f"{name} all targets READY", not not_ready, str(not_ready))
 
@@ -78,8 +84,7 @@ for j in JURISDICTIONS:
         ("DocumentStore", "s3_get_document"),
         ("FaceCompare", "rekognition_compare_faces"),
         ("VelocityStore", "velocity_check"),
-        ("SanctionsExact", "sanctions_exact_match"),
-        ("SanctionsFuzzy", "sanctions_fuzzy"),
+        ("SanctionsScreen", "sanctions_screen"),
         ("PepList", "pep_lookup"),
         ("AdverseMedia", "adverse_media"),
     ])

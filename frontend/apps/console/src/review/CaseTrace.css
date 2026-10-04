@@ -1,0 +1,267 @@
+.kyc-trace {
+  margin-top: var(--space-5);
+}
+
+.kyc-trace__tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: var(--space-4);
+}
+
+.kyc-trace__tab {
+  background: none;
+  border: none;
+  padding: var(--space-2) var(--space-3);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.kyc-trace__tab--active {
+  color: var(--color-text);
+  border-bottom-color: var(--color-accent);
+}
+
+.kyc-trace__section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.kyc-trace__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 13px;
+}
+
+.kyc-trace__row:last-child {
+  border-bottom: none;
+}
+
+.kyc-trace__row dt {
+  color: var(--color-text-secondary);
+  flex-shrink: 0;
+}
+
+.kyc-trace__row dd {
+  margin: 0;
+  text-align: right;
+  font-family: var(--font-mono);
+  word-break: break-word;
+}
+
+.kyc-trace__agent {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.kyc-trace__agent-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.kyc-trace__agent-body {
+  padding: var(--space-3);
+  background: var(--color-bg);
+  border-top: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+.kyc-trace__timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.kyc-trace__step {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.kyc-trace__step-name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.kyc-trace__step-duration {
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.kyc-trace__empty {
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  padding: var(--space-4) 0;
+}
+
+/* ------------------------------------------------------------- facts, decisions, account */
+
+.kyc-trace__fact {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface);
+}
+
+.kyc-trace__fact-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.kyc-trace__fact-header h4 {
+  font-size: 14px;
+  margin-right: auto;
+}
+
+.kyc-trace__fact-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.kyc-trace__facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  font-size: 13px;
+}
+
+.kyc-trace__facts dt {
+  color: var(--color-text-secondary);
+}
+
+.kyc-trace__facts dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  word-break: break-word;
+}
+
+.kyc-trace__hits,
+.kyc-trace__messages {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.kyc-trace__hits li {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+  font-size: 13px;
+}
+
+.kyc-trace__hit-reason {
+  grid-column: 2 / -1;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.kyc-trace__mono {
+  font-family: var(--font-mono);
+}
+
+.kyc-trace__details {
+  margin-top: var(--space-3);
+  font-size: 12px;
+}
+
+.kyc-trace__details summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+}
+
+.kyc-trace__review {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+  font-size: 13px;
+}
+
+.kyc-trace__review p {
+  margin-top: var(--space-1);
+}
+
+.kyc-trace__messages li {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.kyc-trace__message-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+}
+
+/* A message keeps its paragraphs; a model's list keeps its lines, so a reviewer sees its shape. */
+.kyc-trace__message-written,
+.kyc-trace__message-text {
+  white-space: pre-line;
+}
+
+.kyc-trace__message-written {
+  color: var(--color-text-tertiary);
+  text-decoration: line-through;
+}
+
+.kyc-trace__message-why {
+  margin-top: var(--space-1);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+details.kyc-trace__agent > summary {
+  list-style: none;
+}
+
+details.kyc-trace__agent > summary::-webkit-details-marker {
+  display: none;
+}
+
+.kyc-trace__agent-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-weight: 400;
+  text-transform: none;
+}

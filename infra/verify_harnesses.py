@@ -23,7 +23,7 @@ CFG = Config(region_name=REGION, read_timeout=300, retries={"max_attempts": 2})
 cfn = boto3.client("cloudformation", config=CFG)
 dat = boto3.client("bedrock-agentcore", config=CFG)
 
-AGENTS = ("router", "documents", "identity", "fraud", "prescreen", "compliance", "notify")
+AGENTS = ("briefing", "documents", "identity", "fraud", "prescreen", "compliance", "notify")
 results: list[tuple[str, bool, str]] = []
 
 

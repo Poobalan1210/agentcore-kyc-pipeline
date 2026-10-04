@@ -122,6 +122,61 @@ class TestHappyPath:
         assert b"SECRET-THINKING" not in to_json_bytes(build(spans=spans))
 
 
+class TestWhatAReviewedDecisionRecords:
+    """The record of an approval must say what was approved past, not only that a person
+    approved. Before these fields, a reviewer's APPROVE of an engine MANUAL_REVIEW sealed a record
+    indistinguishable from the rules approving on their own."""
+
+    REVIEWED = {
+        # Exactly what `asl._reviewed()` sends: camelCase, the engine's view beside the person's.
+        "outcome": "PROVISIONAL_APPROVE_RESTRICTED",
+        "rule": "REVIEW.approved",
+        "engineOutcome": "MANUAL_REVIEW",
+        "reviewReason": "ENGINE_MANUAL_REVIEW",
+        "clearedAlerts": ["SYN-0106"],
+    }
+
+    def test_the_engines_outcome_the_reason_and_the_cleared_alerts_are_kept(self):
+        decision = to_payload(build(outcome=self.REVIEWED))["decision"]
+        assert decision["outcome"] == "PROVISIONAL_APPROVE_RESTRICTED"
+        assert decision["engineOutcome"] == "MANUAL_REVIEW"
+        assert decision["reviewReason"] == "ENGINE_MANUAL_REVIEW"
+        assert decision["clearedAlerts"] == ["SYN-0106"]
+
+    def test_snake_case_is_read_as_well(self):
+        record = build(outcome={"outcome": "REJECT", "rule": "REVIEW.rejected",
+                                "engine_outcome": "MANUAL_REVIEW",
+                                "review_reason": "ACCOUNT_FROZEN",
+                                "cleared_alerts": ()})
+        assert (record.engine_outcome, record.review_reason, record.cleared_alerts) == (
+            "MANUAL_REVIEW", "ACCOUNT_FROZEN", ())
+
+    def test_a_rules_decision_has_none_of_them(self):
+        decision = to_payload(build())["decision"]
+        assert decision["engineOutcome"] is None
+        assert decision["reviewReason"] is None
+        assert decision["clearedAlerts"] == []
+
+    def test_a_phase2_record_names_the_provisional_decision_it_supersedes(self):
+        payload = to_payload(build(outcome={**OUTCOME, "supersedesDecisionId": "DEC-P1"}))
+        assert payload["supersedesDecisionId"] == "DEC-P1"
+        assert to_payload(build())["supersedesDecisionId"] is None
+
+    def test_the_execution_that_decided_is_named(self):
+        """What the reviewer console uses to find the timeline (`review_api._execution_timeline`).
+        It was never recorded, so that lookup could never resolve."""
+        record = build_decision_record(
+            case_record=CASE, evidence=collect_evidence(complete_spans()), outcome=OUTCOME,
+            versions=PINS, decision_id="DEC-001", decided_at="2026-08-09T10:01:30Z",
+            phase="phase2", execution_name="DEC-P1")
+        assert to_payload(record)["executionName"] == "DEC-P1"
+        assert to_payload(build())["executionName"] is None
+
+    def test_the_new_fields_leave_serialisation_deterministic(self):
+        assert to_json_bytes(build(outcome=self.REVIEWED)) == to_json_bytes(
+            build(outcome=dict(reversed(list(self.REVIEWED.items())))))
+
+
 class TestImmutability:
     def test_fields_cannot_be_rebound(self):
         with pytest.raises(Exception):

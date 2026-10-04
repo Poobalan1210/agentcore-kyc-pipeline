@@ -1,20 +1,33 @@
-"""The seven tools — tasks 2.2, 2.3, 2.5.
+"""The six evidence tools — tasks 2.2, 2.3, 2.5, reworked so that code decides on facts.
 
 Phase 1, latency-critical, provisioned concurrency:
-    s3_get_document, rekognition_compare_faces, velocity_check, sanctions_exact_match
+    s3_get_document, rekognition_compare_faces, velocity_check, sanctions_screen
 
-Phase 2, accuracy-critical, no provisioned concurrency:
-    sanctions_fuzzy, pep_lookup, adverse_media
+Phase 2, accuracy-critical:
+    pep_lookup, adverse_media
+
+Phase 3 (a sanctions list update) re-runs sanctions_screen.
+
+**Every evidence tool reads its inputs from the case record and records its result there**
+(`case_record.py`). The agent supplies an `applicantId` and chooses when to call; it cannot choose
+which name is screened, which document is read, which face is compared or what threshold applies,
+and the decision engine reads what the tool recorded rather than what the agent said about it.
+
+**Screening is one deterministic tool.** Phase 1 used to run exact matching only and leave
+transliteration and name order to Phase 2, minutes later — but the account is already open by then,
+and sanctions breaches are strict liability. The variant matcher is plain code and takes
+milliseconds, so it now runs in Phase 1. What stays in Phase 2 is the part that is genuinely
+slower: politically exposed persons by association and adverse media disambiguation.
 
 **There is no liveness tool, and its absence is a design decision, not an omission.** A
 liveness SessionId expires 180 seconds after issue and takes every associated artefact with it
 (F-40). A tool called by an agent several seconds into a pipeline cannot be relied on to land
 inside that window, so the Public API fetches the result the moment `onAnalysisComplete` fires
-and persists it to the case (R33.5). Agents read a persisted boolean. Making it a tool would
-introduce a race whose failure mode is losing the evidence permanently.
+and persists it to the case (R33.5).
 
 Every screening tool fails closed (R25.7): if the source cannot be consulted the result is
-UNAVAILABLE, never "no match".
+UNAVAILABLE, never "no match" — and the UNAVAILABLE is recorded on the case, so the rules and the
+reviewer see that the check did not run rather than a gap.
 """
 
 from __future__ import annotations
@@ -24,20 +37,28 @@ import os
 import time
 from typing import Any, Mapping
 
-from .contract import HitClassification, ToolError, ToolResult, _now, ok, unavailable, invalid
+from .case_record import (
+    FACT_ATTRIBUTES,
+    aws_error_code,
+    documents_on_case,
+    load_case,
+    record_fact,
+    record_unavailable,
+    screening_identity,
+)
+from .contract import ToolError, ToolResult, _now, ok, unavailable, invalid
+from .controls import list_overlay, unavailable_tools
 from .data.sanctions import (
     ALL_ENTRIES,
-    EXACT_MATCH_SEEDS,
-    FUZZY_SEEDS,
-    FALSE_POSITIVE_DECOYS,
     LIST_SOURCE,
     LIST_VERSION,
     MEDIA_ARTICLES,
     PEP_ENTRIES,
+    Entry,
     normalise,
     tokens,
 )
-from .matching import Candidate, disambiguate_media, exact_match, fuzzy_match
+from .matching import Candidate, disambiguate_media, names_overlap, screen, worst
 from .redact import get_logger, log
 
 LOG = get_logger()
@@ -47,9 +68,13 @@ LOG = get_logger()
 DEMO_LATENCY_MS = int(os.environ.get("DEMO_LATENCY_MS", "0"))
 DEMO_PROFILE = os.environ.get("DEMO_PROFILE", "off").lower() == "on"
 
-#: Fault injection for the fail-closed tests (R25.7 / AC-12). Comma-separated tool names.
-FORCE_UNAVAILABLE = {
-    t.strip() for t in os.environ.get("FORCE_UNAVAILABLE", "").split(",") if t.strip()}
+#: The face-match threshold, applied here and only here (F-44). An earlier version accepted a
+#: `threshold` argument from the agent, which meant a prompt-injected agent could pass 0 and make
+#: any detected face a "match". The argument is now ignored.
+FACE_MATCH_THRESHOLD = 90.0
+
+#: Velocity window. Counts only applications recorded within it.
+VELOCITY_WINDOW_HOURS = 24
 
 
 def _inject_latency(tool: str) -> None:
@@ -60,146 +85,159 @@ def _inject_latency(tool: str) -> None:
 
 
 def _guard(tool: str) -> None:
-    if tool in FORCE_UNAVAILABLE:
-        raise ToolError("fault injection: %s forced unavailable" % tool,
-                        "FORCED_UNAVAILABLE")
+    """Fault injection for the fail-closed tests (R25.7 / AC-12) and the on-stage failure demo.
+
+    Read on every call — see `controls.py` for why an import-time environment read could never be
+    flipped on stage.
+    """
+    if tool in unavailable_tools():
+        raise ToolError("fault injection: %s forced unavailable" % tool, "FORCED_UNAVAILABLE")
 
 
-def _candidate(args: dict[str, Any]) -> Candidate:
-    name = (args.get("name") or "").strip()
-    if not name:
-        raise ToolError("name is required", "MISSING_NAME")
-    alt = args.get("alternateNames") or args.get("alternate_names") or []
-    if isinstance(alt, str):
-        alt = [alt]
-    return Candidate(
-        name=name,
-        dob=(args.get("dob") or None),
-        country=(args.get("country") or None),
-        alternate_names=tuple(a for a in alt if a),
-    )
+def _applicant_id(args: Mapping[str, Any]) -> str:
+    return str(args.get("applicantId") or "").strip()
+
+
+def _missing_applicant(tool: str) -> ToolResult:
+    return invalid(tool, "applicantId is required: this tool reads its inputs from the case "
+                         "record and records its result there", "MISSING_APPLICANT")
+
+
+def _case_or_invalid(tool: str, applicant_id: str) -> tuple[dict[str, Any] | None,
+                                                            ToolResult | None]:
+    case = load_case(applicant_id)
+    if case is None:
+        return None, invalid(tool, "no case record exists for this applicantId",
+                             "CASE_NOT_FOUND")
+    return case, None
+
+
+def _not_performed(applicant_id: str, attribute: str, *, status: str, reason_code: str,
+                   reason: str) -> dict[str, Any]:
+    return record_fact(applicant_id, attribute, {
+        "performed": False, "status": status, "reasonCode": reason_code, "reason": reason})
 
 
 # ------------------------------------------------------------------ Phase 1 tools
 def s3_get_document(args: dict[str, Any], ctx: dict[str, Any]) -> ToolResult:
-    """Read an uploaded document from the jurisdiction bucket.
+    """Read the identity document listed on the case record and record what it says.
 
-    Pre-model validation (R23.1 / F-23) happens here as well as client-side, because the
-    client is untrusted. Nova rejects CMYK, SVG-in-PDF, JPEG2000 and JBIG2, and a rejection
-    at the model boundary is a wasted invocation with a confusing error.
+    The document comes from the case record. An agent may name a bucket and key, but only one the
+    case already lists; anything else is refused, so a steered agent cannot substitute a clean
+    document for the applicant's own.
+
+    Pre-model validation (R23.1 / F-23) happens here as well as client-side, because the client is
+    untrusted. Nova rejects CMYK, SVG-in-PDF, JPEG2000 and JBIG2, and a rejection at the model
+    boundary is a wasted invocation with a confusing error.
     """
-    _guard("s3_get_document")
-    _inject_latency("s3_get_document")
-    bucket = args.get("bucket")
-    key = args.get("key")
-    if not bucket or not key:
-        return invalid("s3_get_document", "bucket and key are required", "MISSING_LOCATION")
+    tool = "s3_get_document"
+    attribute = FACT_ATTRIBUTES["document"]
+    applicant_id = _applicant_id(args)
+    if not applicant_id:
+        return _missing_applicant(tool)
+    try:
+        _guard(tool)
+        _inject_latency(tool)
+        case, refused = _case_or_invalid(tool, applicant_id)
+        if refused is not None:
+            return refused
+        documents = documents_on_case(case)
+        if not documents:
+            _not_performed(applicant_id, attribute, status="INVALID",
+                           reason_code="NO_DOCUMENT_ON_CASE",
+                           reason="no identity document is listed on the case record")
+            return invalid(tool, "no document is listed on the case record",
+                           "NO_DOCUMENT_ON_CASE")
 
+        requested_bucket, requested_key = args.get("bucket"), args.get("key")
+        if requested_bucket or requested_key:
+            doc = next((d for d in documents
+                        if d["bucket"] == requested_bucket and d["key"] == requested_key), None)
+            if doc is None:
+                return invalid(tool, "that document is not listed on this applicant's case "
+                                     "record; omit bucket and key to read the listed document",
+                               "DOCUMENT_NOT_ON_CASE")
+        else:
+            doc = documents[0]
+        return _read_and_record_document(tool, applicant_id, attribute, doc)
+    except ToolError as error:
+        record_unavailable(applicant_id, attribute, error)
+        raise
+
+
+def _read_and_record_document(tool: str, applicant_id: str, attribute: str,
+                              doc: Mapping[str, str]) -> ToolResult:
     import boto3
-    from botocore.exceptions import ClientError
 
+    bucket, key = doc["bucket"], doc["key"]
     s3 = boto3.client("s3")
     try:
         head = s3.head_object(Bucket=bucket, Key=key)
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
+    except Exception as e:  # noqa: BLE001 - narrowed immediately by error code
+        code = aws_error_code(e)
         if code in ("404", "NoSuchKey", "NotFound"):
-            return invalid("s3_get_document", "document not found", "DOCUMENT_NOT_FOUND")
+            _record_document(applicant_id, attribute, doc, {
+                "documentReadable": False, "unreadableReason": "document not found in storage"})
+            return invalid(tool, "document not found", "DOCUMENT_NOT_FOUND")
         raise ToolError("S3 unreachable: %s" % code, "S3_UNAVAILABLE") from e
 
     size = head["ContentLength"]
     ctype = head.get("ContentType", "application/octet-stream")
+    # S3 user metadata stamped at upload. Keys arrive lowercased. `synthetic` marks fixture objects
+    # so the audit record can never confuse a demo document for a real one.
+    metadata = {k.lower(): v for k, v in (head.get("Metadata") or {}).items()}
 
     MAX_BYTES = 25 * 1024 * 1024          # F-23 direct-upload ceiling
     BANNED = ("image/jp2", "image/jpx", "image/jbig2", "image/svg+xml")
     if size > MAX_BYTES:
-        return invalid("s3_get_document",
-                       "document exceeds the 25 MB direct limit", "DOCUMENT_TOO_LARGE")
+        extraction = {"documentReadable": False,
+                      "unreadableReason": "document exceeds the 25 MB direct limit"}
+        _record_document(applicant_id, attribute, doc, extraction, size=size, ctype=ctype,
+                         metadata=metadata)
+        return invalid(tool, extraction["unreadableReason"], "DOCUMENT_TOO_LARGE")
     if ctype in BANNED:
-        return invalid("s3_get_document",
-                       "unsupported format %s (F-23)" % ctype, "UNSUPPORTED_FORMAT")
+        extraction = {"documentReadable": False,
+                      "unreadableReason": "unsupported format %s (F-23)" % ctype}
+        _record_document(applicant_id, attribute, doc, extraction, size=size, ctype=ctype,
+                         metadata=metadata)
+        return invalid(tool, extraction["unreadableReason"], "UNSUPPORTED_FORMAT")
 
-    # S3 user metadata, which `head_object` already returned at no extra cost. This is the channel
-    # the upload path stamps validated document attributes onto — issuing country, expiry, MRZ
-    # validity — so the agent reads extracted fields rather than inferring them from a filename.
-    #
-    # Added after a live run showed the Document agent correctly but uselessly reporting every
-    # field "not available in the document metadata": it had size and content type and nothing
-    # else, so it could not evaluate expiry (R28.1) or unsupported issuer (R28.2) at all. An agent
-    # asked to judge conditions it has no inputs for will either abstain or invent, and abstaining
-    # was the good outcome.
-    #
-    # Keys arrive lowercased by S3. `synthetic` marks fixture objects so the audit record can never
-    # confuse a demo document for a real one.
-    metadata = {k.lower(): v for k, v in (head.get("Metadata") or {}).items()}
-
-    data: dict[str, Any] = {
-        "bucket": bucket, "key": key, "sizeBytes": size, "contentType": ctype,
-        "documentType": args.get("documentType", metadata.get("documenttype", "UNKNOWN")),
-        "metadata": metadata,
-        "synthetic": metadata.get("synthetic") == "true",
-    }
     extraction = _extract_document_fields(
         s3, bucket=bucket, key=key, content_type=ctype, size_bytes=size)
+    recorded = _record_document(applicant_id, attribute, doc, extraction, size=size,
+                                ctype=ctype, metadata=metadata)
+    data: dict[str, Any] = {
+        "bucket": bucket, "key": key, "sizeBytes": size, "contentType": ctype,
+        "documentType": recorded["document"]["documentType"],
+        "metadata": metadata,
+        "synthetic": recorded["document"]["synthetic"],
+        "recorded": True,
+    }
     data.update(extraction)
-
-    # Persisted straight to the case record, deliberately bypassing the model.
-    #
-    # The MRZ check digits make this the one part of document extraction that is *verified* rather
-    # than merely trusted, and the decision engine compares it against the applicant's declared
-    # details. Routing that through the agent's own finding would turn a checkable fact into a
-    # paraphrase — and the whole reason the output contracts exist (R11.13, F-89) is that prose is
-    # not a data interface.
-    #
-    # Best effort: `applicantId` is not required by this tool's schema, so an agent that omits it
-    # still gets its extraction back. The comparison then reports `performed: False`, which is
-    # visible in the audit record rather than silently absent.
-    applicant_id = args.get("applicantId") or (ctx or {}).get("applicantId")
-    if applicant_id:
-        _persist_document_extraction(str(applicant_id), extraction)
-
-    return ok("s3_get_document", data, source="s3")
+    return ok(tool, data, source="s3")
 
 
-#: Case-record attribute for the verified extraction. A flat attribute for the same reason
-#: `FINDING_ATTRIBUTES` are flat: a nested `SET` into a map that may not exist yet is rejected by
-#: DynamoDB with overlapping document paths, and it fails at invoke time where the agent reports it
-#: as an unhandled error and the case degrades to review.
-DOCUMENT_EXTRACTION_ATTRIBUTE = "documentExtraction"
-
-
-def _persist_document_extraction(applicant_id: str, extraction: dict[str, Any]) -> None:
-    """Write the verified extraction to the case record.
-
-    Non-fatal by design, unlike `_persist_finding`. A finding that cannot be recorded means an agent
-    result is lost, so that raises. Here the extraction has already been returned to the agent and
-    the pipeline can still reach a decision without the cross-check; failing the tool call would
-    turn a degraded control into a failed document read, which is strictly worse.
-    """
-    table_name = os.environ.get("CASE_TABLE")
-    if not table_name:
-        return
-
-    import json
-
-    import boto3
-
-    ddb = boto3.client("dynamodb")
-    try:
-        ddb.update_item(
-            TableName=table_name,
-            Key={"applicantId": {"S": applicant_id}, "sk": {"S": "CASE"}},
-            UpdateExpression="SET #e = :e, updatedAt = :t",
-            ExpressionAttributeNames={"#e": DOCUMENT_EXTRACTION_ATTRIBUTE},
-            ExpressionAttributeValues={
-                # Canonical JSON so a retried call writes byte-identical content, which makes the
-                # write idempotent rather than merely repeatable.
-                ":e": {"S": json.dumps(extraction, sort_keys=True)},
-                ":t": {"S": _now()},
-            },
-        )
-    except Exception:  # noqa: BLE001 - see the docstring: degraded control, not a failed read
-        LOG.warning("could not persist document extraction for %s", applicant_id)
+def _record_document(applicant_id: str, attribute: str, doc: Mapping[str, str],
+                     extraction: Mapping[str, Any], *, size: int | None = None,
+                     ctype: str | None = None,
+                     metadata: Mapping[str, str] | None = None) -> dict[str, Any]:
+    metadata = metadata or {}
+    fact = {
+        "performed": True,
+        **extraction,
+        "document": {
+            "bucket": doc["bucket"],
+            "key": doc["key"],
+            # The type recorded at intake wins over anything read later; the agent's opinion of
+            # the document type is not an input.
+            "documentType": doc.get("type") or metadata.get("documenttype") or "UNKNOWN",
+            "issuingCountry": doc.get("issuingCountry") or metadata.get("issuingcountry"),
+            "contentType": ctype,
+            "sizeBytes": size,
+            "synthetic": metadata.get("synthetic") == "true",
+        },
+    }
+    return record_fact(applicant_id, attribute, fact)
 
 
 #: Textract's synchronous limit for inline bytes. A larger object would be rejected by the service,
@@ -220,12 +258,6 @@ _MAX_TEXT_LINES = 60
 def _extract_document_fields(s3, *, bucket: str, key: str, content_type: str,
                              size_bytes: int) -> dict[str, Any]:
     """Read the document and report what it actually says.
-
-    Before this existed the Documents agent received only a size and a content type, and a live run
-    showed it correctly but uselessly reporting every field "not available in the document
-    metadata" — it had no input from which to judge expiry (R28.1) or an unsupported issuer
-    (R28.2), so it abstained. Abstaining was the good outcome; inventing values would have been the
-    bad one.
 
     Two layers, answering different questions:
 
@@ -267,10 +299,7 @@ def _extract_document_fields(s3, *, bucket: str, key: str, content_type: str,
     try:
         blocks = textract.detect_document_text(Document={"Bytes": body})["Blocks"]
     except Exception as exc:  # noqa: BLE001 - narrowed immediately by error code
-        response = getattr(exc, "response", None)
-        code = type(exc).__name__
-        if isinstance(response, Mapping):
-            code = str((response.get("Error") or {}).get("Code") or code)
+        code = aws_error_code(exc)
         if code in ("UnsupportedDocumentException", "BadDocumentException",
                     "DocumentTooLargeException", "InvalidParameterException"):
             return {"documentReadable": False,
@@ -291,286 +320,419 @@ def _extract_document_fields(s3, *, bucket: str, key: str, content_type: str,
 
 
 def rekognition_compare_faces(args: dict[str, Any], ctx: dict[str, Any]) -> ToolResult:
-    """Compare the document portrait against the liveness reference frame.
+    """Compare the document portrait on the case against the liveness reference frame on the case.
 
-    The similarity threshold is applied here, server side, and only a boolean plus a bucketed
-    band crosses back. F-44 makes the same point about liveness: the caller decides, not the
-    service, and the raw score is not the agent's business.
+    Both images come from the case record: the first listed document (jurisdiction evidence
+    bucket, Object Lock) and `liveness.referenceImageKey` (biometric bucket, 24-hour lifecycle,
+    because a real face must stay deletable — R36.1-R36.3). The agent cannot name either image and
+    cannot set the threshold.
+
+    Only a boolean and a bucketed band cross back (F-44): the raw score is not the agent's
+    business, and nothing downstream may re-threshold it.
     """
-    _guard("rekognition_compare_faces")
-    _inject_latency("rekognition_compare_faces")
-    src = args.get("sourceKey")
-    tgt = args.get("targetKey")
+    tool = "rekognition_compare_faces"
+    attribute = FACT_ATTRIBUTES["face"]
+    applicant_id = _applicant_id(args)
+    if not applicant_id:
+        return _missing_applicant(tool)
+    try:
+        _guard(tool)
+        _inject_latency(tool)
+        case, refused = _case_or_invalid(tool, applicant_id)
+        if refused is not None:
+            return refused
+        documents = documents_on_case(case)
+        if not documents:
+            _not_performed(applicant_id, attribute, status="INVALID",
+                           reason_code="NO_DOCUMENT_ON_CASE",
+                           reason="no identity document is listed on the case record")
+            return invalid(tool, "no document is listed on the case record",
+                           "NO_DOCUMENT_ON_CASE")
+        liveness = case.get("liveness") if isinstance(case.get("liveness"), Mapping) else {}
+        frame_key = str(liveness.get("referenceImageKey") or "")
+        if not frame_key:
+            # Ours to fix, not the applicant's: today the frame is only captured where the
+            # biometric bucket shares the liveness Region (api/liveness.py). UNAVAILABLE, so it
+            # routes to a human rather than asking the applicant for something they cannot give.
+            _not_performed(applicant_id, attribute, status="UNAVAILABLE",
+                           reason_code="NO_REFERENCE_FRAME",
+                           reason="the case record carries no liveness reference frame")
+            return invalid(tool, "no liveness reference frame on the case record",
+                           "NO_REFERENCE_FRAME")
+        target_bucket = os.environ.get("BIOMETRIC_BUCKET")
+        if not target_bucket:
+            raise ToolError("BIOMETRIC_BUCKET is not configured", "NOT_CONFIGURED")
+        source = documents[0]
+        return _compare_and_record(tool, applicant_id, attribute, source, target_bucket,
+                                   frame_key)
+    except ToolError as error:
+        record_unavailable(applicant_id, attribute, error)
+        raise
 
-    # One bucket per image, because the two images deliberately live in different buckets.
-    #
-    # The document sits in the jurisdiction evidence bucket (Object Lock, seven years). The liveness
-    # reference frame sits in the biometric bucket (no Object Lock, 24-hour lifecycle) precisely
-    # because a real human face must remain deletable (R36.1-R36.3). An earlier version accepted a
-    # single `bucket` for both, which made this comparison impossible to perform at all: it could
-    # only ever compare two objects in the same bucket, and no such pair exists in this system.
-    # Rekognition's own API has always allowed an independent `S3Object` per image — the limitation
-    # was ours, and it left the strongest identity control inert.
-    #
-    # `bucket` is still honoured as a fallback for both sides so an existing caller keeps working.
-    fallback_bucket = args.get("bucket")
-    source_bucket = args.get("sourceBucket") or fallback_bucket
-    # Defaulted from the environment rather than demanded from the agent. A model that guessed the
-    # wrong bucket would get an unreadable-image finding, which reads as a bad document rather than
-    # as a misrouted lookup — a misleading diagnosis for an operator to chase.
-    target_bucket = (args.get("targetBucket") or fallback_bucket
-                     or os.environ.get("BIOMETRIC_BUCKET"))
 
-    if not (src and tgt and source_bucket and target_bucket):
-        return invalid(
-            "rekognition_compare_faces",
-            "sourceKey, targetKey and a bucket for each image are required",
-            "MISSING_LOCATION")
-
-    threshold = float(args.get("threshold", 90.0))
-
+def _compare_and_record(tool: str, applicant_id: str, attribute: str,
+                        source: Mapping[str, str], target_bucket: str,
+                        frame_key: str) -> ToolResult:
     import boto3
-    from botocore.exceptions import ClientError
 
     rek = boto3.client("rekognition")
+    provenance = {"documentKey": source["key"], "referenceFramePresent": True,
+                  "threshold": FACE_MATCH_THRESHOLD}
     try:
         resp = rek.compare_faces(
-            SourceImage={"S3Object": {"Bucket": source_bucket, "Name": src}},
-            TargetImage={"S3Object": {"Bucket": target_bucket, "Name": tgt}},
-            SimilarityThreshold=threshold,
+            SourceImage={"S3Object": {"Bucket": source["bucket"], "Name": source["key"]}},
+            TargetImage={"S3Object": {"Bucket": target_bucket, "Name": frame_key}},
+            SimilarityThreshold=FACE_MATCH_THRESHOLD,
         )
-    except ClientError as e:
-        code = e.response["Error"]["Code"]
+    except Exception as e:  # noqa: BLE001 - narrowed immediately by error code
+        code = aws_error_code(e)
         if code == "InvalidParameterException":
-            # Rekognition raises this when it finds no face at all, which is a real finding
-            # about the document, not a transport failure.
-            return ok("rekognition_compare_faces",
-                      {"match": False, "faceDetected": False,
-                       "reason": "no detectable face in one of the images"},
-                      source="rekognition")
+            # Rekognition raises this when it finds no face at all: a real finding about the
+            # document, not a transport failure.
+            fact = record_fact(applicant_id, attribute, {
+                "performed": True, "faceDetected": False, "match": False,
+                "similarityBand": "NONE",
+                "reason": "no detectable face in one of the images", **provenance})
+            return ok(tool, _face_view(fact), source="rekognition")
         if code in ("InvalidS3ObjectException", "InvalidImageFormatException",
                     "ImageTooLargeException"):
-            # A missing or unreadable image is a precondition failure, not an outage. The
-            # distinction is operational, not pedantic: UNAVAILABLE is retryable and INVALID
-            # is not, so mislabelling this makes the pipeline retry a permanent failure until
-            # it exhausts its budget.
-            return invalid("rekognition_compare_faces",
-                           "image missing or unreadable (%s)" % code,
-                           "IMAGE_UNREADABLE")
-        raise ToolError("Rekognition unreachable: %s" % code,
-                        "REKOGNITION_UNAVAILABLE") from e
+            # Applicant-fixable and not retryable: INVALID routes to a step-up for a better image.
+            _not_performed(applicant_id, attribute, status="INVALID",
+                           reason_code="IMAGE_UNREADABLE",
+                           reason="image missing or unreadable (%s)" % code)
+            return invalid(tool, "image missing or unreadable (%s)" % code, "IMAGE_UNREADABLE")
+        raise ToolError("Rekognition unreachable: %s" % code, "REKOGNITION_UNAVAILABLE") from e
 
     matches = resp.get("FaceMatches", [])
     best = max((m["Similarity"] for m in matches), default=0.0)
-    return ok("rekognition_compare_faces",
-              {"match": bool(matches),
-               "faceDetected": True,
-               # Bucketed, not raw. Enough for a reviewer, not a score to re-threshold on.
-               "similarityBand": ("HIGH" if best >= 95 else
-                                  "MEDIUM" if best >= threshold else "LOW"),
-               "unmatchedFaces": len(resp.get("UnmatchedFaces", []))},
-              source="rekognition")
+    fact = record_fact(applicant_id, attribute, {
+        "performed": True,
+        "match": bool(matches),
+        "faceDetected": True,
+        # Bucketed, not raw. Enough for a reviewer, not a score to re-threshold on.
+        "similarityBand": ("HIGH" if best >= 95 else
+                           "MEDIUM" if best >= FACE_MATCH_THRESHOLD else "LOW"),
+        "unmatchedFaces": len(resp.get("UnmatchedFaces", [])),
+        **provenance,
+    })
+    return ok(tool, _face_view(fact), source="rekognition")
+
+
+def _face_view(fact: Mapping[str, Any]) -> dict[str, Any]:
+    keys = ("match", "faceDetected", "similarityBand", "unmatchedFaces", "reason")
+    view = {k: fact[k] for k in keys if k in fact}
+    view["recorded"] = True
+    return view
 
 
 def velocity_check(args: dict[str, Any], ctx: dict[str, Any]) -> ToolResult:
-    """Device and IP velocity. R29.6 synthetic-identity signal.
+    """Device and IP velocity from identifiers captured at intake. R29.6 synthetic-identity signal.
 
     Returns signals, never a verdict. Whether a signal is disqualifying is a decision-engine
-    question (§8.4), and putting that judgement in a tool would move a control out of the pure
-    layer where it can be tested deterministically.
+    question (§8.4).
+
+    This build does not capture device or IP identifiers at intake (plan v2 defers it: only the
+    mule-pattern variant of the risk-event act needs them). When the case carries none, the tool
+    records `performed: false, status: NOT_ESTABLISHED` rather than zero counts — "we did not look"
+    and "we looked and saw nothing" are different facts, and only the first is true here.
     """
-    _guard("velocity_check")
-    _inject_latency("velocity_check")
-    device_id = args.get("deviceId")
-    ip = args.get("ipAddress")
-    if not (device_id or ip):
-        return invalid("velocity_check", "deviceId or ipAddress is required",
-                       "MISSING_IDENTIFIER")
+    tool = "velocity_check"
+    attribute = FACT_ATTRIBUTES["velocity"]
+    applicant_id = _applicant_id(args)
+    if not applicant_id:
+        return _missing_applicant(tool)
+    try:
+        _guard(tool)
+        _inject_latency(tool)
+        case, refused = _case_or_invalid(tool, applicant_id)
+        if refused is not None:
+            return refused
+        intake = case.get("intake") if isinstance(case.get("intake"), Mapping) else {}
+        device = str(intake.get("deviceHash") or "")
+        ip = str(intake.get("ipHash") or "")
+        if not (device or ip):
+            fact = _not_performed(
+                applicant_id, attribute, status="NOT_ESTABLISHED",
+                reason_code="NO_DEVICE_OR_IP_CAPTURED",
+                reason="no device or IP identifier was captured at intake, so velocity "
+                       "could not be assessed")
+            return ok(tool, {"performed": False, "reasonCode": fact["reasonCode"],
+                             "reason": fact["reason"], "recorded": True},
+                      source="velocity-store")
 
-    table_name = os.environ.get("VELOCITY_TABLE")
-    if not table_name:
-        # No table configured is a configuration fault, not "no velocity observed".
-        raise ToolError("VELOCITY_TABLE is not configured", "NOT_CONFIGURED")
+        table_name = os.environ.get("VELOCITY_TABLE")
+        if not table_name:
+            # No table configured is a configuration fault, not "no velocity observed".
+            raise ToolError("VELOCITY_TABLE is not configured", "NOT_CONFIGURED")
+        counts = _velocity_counts(table_name, {"device": device, "ip": ip})
+        device_n, ip_n = counts.get("device", 0), counts.get("ip", 0)
+        fact = record_fact(applicant_id, attribute, {
+            "performed": True,
+            "deviceApplications": device_n,
+            "ipApplications": ip_n,
+            "windowHours": VELOCITY_WINDOW_HOURS,
+            "signals": {
+                "criticalDeviceReuse": device_n >= 5,
+                "elevatedIpReuse": 3 <= ip_n < 10,
+                "criticalIpReuse": ip_n >= 10,
+            },
+        })
+        view = {k: fact[k] for k in ("deviceApplications", "ipApplications", "windowHours",
+                                     "signals")}
+        view.update({"performed": True, "recorded": True})
+        return ok(tool, view, source="velocity-store")
+    except ToolError as error:
+        record_unavailable(applicant_id, attribute, error)
+        raise
 
+
+def _velocity_counts(table_name: str, identifiers: Mapping[str, str]) -> dict[str, int]:
     import boto3
-    from botocore.exceptions import ClientError
 
     ddb = boto3.client("dynamodb")
+    now_epoch = int(time.time())
     counts: dict[str, int] = {}
     try:
-        for label, value in (("device", device_id), ("ip", ip)):
+        for label, value in identifiers.items():
             if not value:
                 continue
-            r = ddb.query(
-                TableName=table_name,
-                KeyConditionExpression="pk = :pk",
-                ExpressionAttributeValues={":pk": {"S": f"{label}#{value}"}},
-                Select="COUNT",
-            )
-            counts[label] = int(r.get("Count", 0))
-    except ClientError as e:
-        raise ToolError("velocity store unreachable: %s" % e.response["Error"]["Code"],
+            total = 0
+            kwargs: dict[str, Any] = {
+                "TableName": table_name,
+                "KeyConditionExpression": "pk = :pk",
+                # TTL deletion lags by up to 48 hours, so expiry is filtered explicitly.
+                "FilterExpression": "expiresAt > :now",
+                "ExpressionAttributeValues": {":pk": {"S": f"{label}#{value}"},
+                                              ":now": {"N": str(now_epoch)}},
+                "Select": "COUNT",
+            }
+            while True:
+                r = ddb.query(**kwargs)
+                total += int(r.get("Count", 0))
+                if not r.get("LastEvaluatedKey"):
+                    break
+                kwargs["ExclusiveStartKey"] = r["LastEvaluatedKey"]
+            counts[label] = total
+    except Exception as e:  # noqa: BLE001 - narrowed to a named outage
+        raise ToolError("velocity store unreachable: %s" % aws_error_code(e),
                         "VELOCITY_UNAVAILABLE") from e
-
-    device_n = counts.get("device", 0)
-    ip_n = counts.get("ip", 0)
-    return ok("velocity_check",
-              {"deviceApplications": device_n,
-               "ipApplications": ip_n,
-               "signals": {
-                   "criticalDeviceReuse": device_n >= 5,
-                   "elevatedIpReuse": 3 <= ip_n < 10,
-                   "criticalIpReuse": ip_n >= 10,
-               }},
-              source="velocity-store")
+    return counts
 
 
-def sanctions_exact_match(args: dict[str, Any], ctx: dict[str, Any]) -> ToolResult:
-    """Phase 1 pre-screen. Exact match only (R11.2), fail closed (R25.7).
+def current_list() -> tuple[str, tuple[Entry, ...]]:
+    """The base list plus any published list update, and the version that describes both."""
+    overlay_version, overlay_entries = list_overlay()
+    if not overlay_entries:
+        return LIST_VERSION, ALL_ENTRIES
+    base_ids = {e.entry_id for e in ALL_ENTRIES}
+    clash = sorted(e.entry_id for e in overlay_entries if e.entry_id in base_ids)
+    if clash:
+        # A list update that reuses an existing id would silently shadow a designation.
+        raise ToolError("list update reuses existing entry ids: %s" % ", ".join(clash),
+                        "LIST_UNAVAILABLE")
+    return "%s+%s" % (LIST_VERSION, overlay_version), ALL_ENTRIES + overlay_entries
 
-    Deliberately cannot find the fuzzy cases. Phase 1 is a blocking gate on a 90-second
-    budget, and a confirmed exact hit is enough to stop a provisional account (R4.3). Anything
-    subtler is Phase 2's job, where there is no clock pressure.
+
+def sanctions_screen(args: dict[str, Any], ctx: dict[str, Any]) -> ToolResult:
+    """Sanctions screening of the identity on the case record. Exact and variant, fail closed.
+
+    Screens the applicant's declared identity (see `ScreeningIdentity` for why declared) against
+    the current list, including any published update. Every alert is classified CONFIRMED,
+    PROBABLE or POSSIBLE with a reason; every exclusion is reported with its reason (R27.5).
+
+    `name` is what the agent read off the case record. It is not what gets screened. It is recorded
+    beside the result so a reviewer can see when the agent's view of the applicant and the record
+    disagree — which is what a prompt-injected agent looks like from here.
     """
-    _guard("sanctions_exact_match")
-    _inject_latency("sanctions_exact_match")
+    tool = "sanctions_screen"
+    attribute = FACT_ATTRIBUTES["screening"]
+    applicant_id = _applicant_id(args)
+    if not applicant_id:
+        return _missing_applicant(tool)
+    agent_name = str(args.get("name") or "").strip()
     try:
-        candidate = _candidate(args)
-    except ToolError as e:
-        return invalid("sanctions_exact_match", e.reason, e.reason_code)
+        _guard(tool)
+        _inject_latency(tool)
+        case, refused = _case_or_invalid(tool, applicant_id)
+        if refused is not None:
+            return refused
+        identity = screening_identity(case)
+        if not identity.name:
+            _not_performed(applicant_id, attribute, status="UNAVAILABLE",
+                           reason_code="NO_NAME_ON_RECORD",
+                           reason="the case record carries no declared name to screen")
+            return invalid(tool, "the case record carries no declared name to screen",
+                           "NO_NAME_ON_RECORD")
 
-    hits = exact_match(candidate, ALL_ENTRIES)
-    return ok("sanctions_exact_match",
-              {"matched": bool(hits),
-               "hitCount": len(hits),
-               "hits": [
-                   {"entryId": h.entry_id, "classification": h.classification.value,
-                    "programme": h.programme, "reason": h.reason,
-                    "dobMatch": h.dob_match, "countryMatch": h.country_match}
-                   for h in hits],
-               "syntheticData": True},
-              source=LIST_SOURCE, list_version=LIST_VERSION)
+        version, entries = current_list()
+        candidate = Candidate(name=identity.name, dob=identity.dob, country=identity.country,
+                              alternate_names=identity.alternate_names)
+        alerts, exclusions = screen(candidate, entries)
+        strongest = worst(alerts)
+        fact = record_fact(applicant_id, attribute, {
+            "performed": True,
+            "listVersion": version,
+            "source": LIST_SOURCE,
+            "syntheticData": True,
+            "strongest": strongest.value,
+            "hits": [h.to_dict() for h in alerts],
+            "excluded": [{"entryId": h.entry_id, "matchedName": h.matched_name,
+                          "reason": h.reason} for h in exclusions],
+            "screened": identity.to_dict(),
+            "agentSuppliedName": agent_name or None,
+            "agentNameMatchesRecord": (tokens(agent_name) == tokens(identity.name)
+                                       if agent_name else None),
+        })
+        return ok(tool, {
+            "matched": bool(alerts),
+            "strongest": fact["strongest"],
+            "hitCount": len(alerts),
+            "hits": fact["hits"],
+            "excluded": fact["excluded"],
+            "screenedName": identity.name,
+            "syntheticData": True,
+            "recorded": True,
+        }, source=LIST_SOURCE, list_version=version)
+    except ToolError as error:
+        record_unavailable(applicant_id, attribute, error)
+        raise
 
 
 # ------------------------------------------------------------------ Phase 2 tools
-def sanctions_fuzzy(args: dict[str, Any], ctx: dict[str, Any]) -> ToolResult:
-    """R27.1-R27.4. Transliteration, diacritics, name order, married/maiden."""
-    _guard("sanctions_fuzzy")
-    _inject_latency("sanctions_fuzzy")
-    try:
-        candidate = _candidate(args)
-    except ToolError as e:
-        return invalid("sanctions_fuzzy", e.reason, e.reason_code)
-
-    hits = [h for h in fuzzy_match(candidate, ALL_ENTRIES)
-            if h.classification is not HitClassification.NO_MATCH]
-    excluded = [h for h in fuzzy_match(candidate, ALL_ENTRIES)
-                if h.classification is HitClassification.NO_MATCH]
-
-    return ok("sanctions_fuzzy",
-              {"matched": bool(hits),
-               "hitCount": len(hits),
-               "hits": [
-                   {"entryId": h.entry_id, "matchedName": h.matched_name,
-                    "classification": h.classification.value, "score": h.score,
-                    "programme": h.programme, "reason": h.reason,
-                    "dobMatch": h.dob_match, "nameReordered": h.name_reordered}
-                   for h in hits],
-               # Exclusions are reported, not hidden. A reviewer seeing "we looked at this and
-               # ruled it out, here is why" is being given evidence; silence is not.
-               "excluded": [
-                   {"entryId": h.entry_id, "reason": h.reason} for h in excluded],
-               "syntheticData": True},
-              source=LIST_SOURCE, list_version=LIST_VERSION)
-
-
 def pep_lookup(args: dict[str, Any], ctx: dict[str, Any]) -> ToolResult:
-    """R27.6. PEP by association — spouse, child, business partner — with the relationship."""
-    _guard("pep_lookup")
-    _inject_latency("pep_lookup")
+    """R27.6. PEP by association — spouse, child, business partner — with the relationship.
+
+    Reads the identity from the case record. A PEP listing whose name overlaps but whose date of
+    birth differs from the applicant's is reported as excluded, not matched: the earlier version let
+    an exact name alone set `pepStatus` even when the dates conflicted.
+    """
+    tool = "pep_lookup"
+    attribute = FACT_ATTRIBUTES["pep"]
+    applicant_id = _applicant_id(args)
+    if not applicant_id:
+        return _missing_applicant(tool)
     try:
-        candidate = _candidate(args)
-    except ToolError as e:
-        return invalid("pep_lookup", e.reason, e.reason_code)
+        _guard(tool)
+        _inject_latency(tool)
+        case, refused = _case_or_invalid(tool, applicant_id)
+        if refused is not None:
+            return refused
+        identity = screening_identity(case)
+        if not identity.name:
+            _not_performed(applicant_id, attribute, status="UNAVAILABLE",
+                           reason_code="NO_NAME_ON_RECORD",
+                           reason="the case record carries no declared name to screen")
+            return invalid(tool, "the case record carries no declared name to screen",
+                           "NO_NAME_ON_RECORD")
 
-    ct = tokens(candidate.name)
-    found = []
-    for p in PEP_ENTRIES:
-        pt = tokens(p.name)
-        if not pt or not ct:
-            continue
-        overlap = len(ct & pt) / max(len(ct), len(pt))
-        if overlap < 0.6:
-            continue
-        dob_match = bool(candidate.dob and p.dob and candidate.dob == p.dob)
-        if not dob_match and normalise(candidate.name) != normalise(p.name):
-            continue
-        found.append({
-            "entryId": p.entry_id,
-            "position": p.position,
-            "relationship": p.relationship,
-            "relatedTo": p.related_to,
-            "dobMatch": dob_match,
-            # R4: SELF and ASSOCIATE both drive HIGH, but the tier rule needs to know which.
-            "pepStatus": "SELF" if p.relationship == "SELF" else "ASSOCIATE",
-        })
+        found, excluded = [], []
+        for p in PEP_ENTRIES:
+            if not names_overlap(identity.name, p.name):
+                continue
+            if identity.dob and p.dob and identity.dob != p.dob:
+                excluded.append({"entryId": p.entry_id,
+                                 "reason": "names overlap but the dates of birth differ"})
+                continue
+            dob_match = bool(identity.dob and p.dob and identity.dob == p.dob)
+            if not dob_match and normalise(identity.name) != normalise(p.name):
+                continue
+            found.append({
+                "entryId": p.entry_id,
+                "position": p.position,
+                "relationship": p.relationship,
+                "relatedTo": p.related_to,
+                "dobMatch": dob_match,
+                # R4: SELF and ASSOCIATE both drive HIGH, but the tier rule needs to know which.
+                "pepStatus": "SELF" if p.relationship == "SELF" else "ASSOCIATE",
+            })
 
-    status = "NONE"
-    if any(f["pepStatus"] == "SELF" for f in found):
-        status = "SELF"
-    elif found:
-        status = "ASSOCIATE"
+        status = "NONE"
+        if any(f["pepStatus"] == "SELF" for f in found):
+            status = "SELF"
+        elif found:
+            status = "ASSOCIATE"
 
-    return ok("pep_lookup",
-              {"pepStatus": status, "hitCount": len(found), "hits": found,
-               "syntheticData": True},
-              source="synthetic-pep-list", list_version=LIST_VERSION)
+        record_fact(applicant_id, attribute, {
+            "performed": True, "pepStatus": status, "hits": found, "excluded": excluded,
+            "listVersion": LIST_VERSION, "source": "synthetic-pep-list",
+            "syntheticData": True})
+        return ok(tool, {"pepStatus": status, "hitCount": len(found), "hits": found,
+                         "excluded": excluded, "syntheticData": True, "recorded": True},
+                  source="synthetic-pep-list", list_version=LIST_VERSION)
+    except ToolError as error:
+        record_unavailable(applicant_id, attribute, error)
+        raise
 
 
 def adverse_media(args: dict[str, Any], ctx: dict[str, Any]) -> ToolResult:
-    """R27.7. Entity disambiguation — a name collision is not a match."""
-    _guard("adverse_media")
-    _inject_latency("adverse_media")
+    """R27.7. Entity disambiguation — a name collision is not a match.
+
+    Reads the identity from the case record. Only articles whose subject name overlaps the
+    applicant's are considered at all; the earlier version reported every unrelated article as a
+    "rejected collision", which put other people's headlines on every applicant's record.
+    """
+    tool = "adverse_media"
+    attribute = FACT_ATTRIBUTES["adverse_media"]
+    applicant_id = _applicant_id(args)
+    if not applicant_id:
+        return _missing_applicant(tool)
     try:
-        candidate = _candidate(args)
-    except ToolError as e:
-        return invalid("adverse_media", e.reason, e.reason_code)
+        _guard(tool)
+        _inject_latency(tool)
+        case, refused = _case_or_invalid(tool, applicant_id)
+        if refused is not None:
+            return refused
+        identity = screening_identity(case)
+        if not identity.name:
+            _not_performed(applicant_id, attribute, status="UNAVAILABLE",
+                           reason_code="NO_NAME_ON_RECORD",
+                           reason="the case record carries no declared name to screen")
+            return invalid(tool, "the case record carries no declared name to screen",
+                           "NO_NAME_ON_RECORD")
 
-    attributed, rejected = [], []
-    for a in MEDIA_ARTICLES:
-        is_match, reason = disambiguate_media(
-            candidate, a.subject_name or "", a.subject_dob, a.subject_country)
-        record = {"articleId": a.article_id, "headline": a.headline,
-                  "severity": a.severity, "reason": reason}
-        (attributed if is_match else rejected).append(record)
+        candidate = Candidate(name=identity.name, dob=identity.dob, country=identity.country)
+        attributed, rejected = [], []
+        for a in MEDIA_ARTICLES:
+            if not a.subject_name or not names_overlap(identity.name, a.subject_name):
+                continue
+            is_match, reason = disambiguate_media(
+                candidate, a.subject_name, a.subject_dob, a.subject_country)
+            record = {"articleId": a.article_id, "headline": a.headline,
+                      "severity": a.severity, "reason": reason}
+            (attributed if is_match else rejected).append(record)
 
-    severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
-    worst_sev = max((severity_rank[r["severity"]] for r in attributed), default=0)
-    return ok("adverse_media",
-              {"matched": bool(attributed),
-               "hitCount": len(attributed),
-               "maxSeverity": {0: "NONE", 1: "LOW", 2: "MEDIUM", 3: "HIGH"}[worst_sev],
-               "attributed": attributed,
-               "rejectedCollisions": rejected,
-               "syntheticData": True},
-              source="synthetic-media-index", list_version=LIST_VERSION)
+        severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+        worst_sev = max((severity_rank[r["severity"]] for r in attributed), default=0)
+        max_severity = {0: "NONE", 1: "LOW", 2: "MEDIUM", 3: "HIGH"}[worst_sev]
+        record_fact(applicant_id, attribute, {
+            "performed": True, "maxSeverity": max_severity, "attributed": attributed,
+            "rejectedCollisions": rejected, "listVersion": LIST_VERSION,
+            "source": "synthetic-media-index", "syntheticData": True})
+        return ok(tool, {"matched": bool(attributed), "hitCount": len(attributed),
+                         "maxSeverity": max_severity, "attributed": attributed,
+                         "rejectedCollisions": rejected, "syntheticData": True,
+                         "recorded": True},
+                  source="synthetic-media-index", list_version=LIST_VERSION)
+    except ToolError as error:
+        record_unavailable(applicant_id, attribute, error)
+        raise
 
 
 # --- output contracts (R11.13, F-89) ---------------------------------------------------------
 #
-# These exist because an agent's prose is not a data interface. Across two consecutive live runs
-# with an identical prompt, fixture and model configuration, the Document agent expressed the same
-# finding once as `{"confidence": 0.96}` and once as a sentence; the derived signals differed, and
-# R3.5's "identical outcome on every evaluation" cannot hold on a foundation like that.
+# Built and tested, but not deployed (`tool_schemas.ENABLE_OUTPUT_CONTRACTS`). They were the first
+# answer to "prose is not a data interface": across two consecutive live runs with an identical
+# prompt, fixture and model configuration, the Document agent expressed the same finding once as
+# `{"confidence": 0.96}` and once as a sentence.
 #
-# A submit_* call is validated against a JSON Schema by the service before it reaches here, so the
-# shape is not the model's choice. The finding is then persisted on the case record, which makes it
-# the *state machine* that reads structured data rather than parsing text.
+# The evidence tools above are the second, stronger answer: they record the facts themselves, so
+# the decision engine does not need the agent to report anything. A contract now records only the
+# agent's narrative, which is useful to a reviewer and irrelevant to the outcome.
 
 
 #: Case-record attribute per agent. Flat rather than nested — see `_persist_finding`.
 FINDING_ATTRIBUTES: dict[str, str] = {
-    "router": "findingRouter",
+    "briefing": "findingBriefing",
     "documents": "findingDocuments",
     "identity": "findingIdentity",
     "prescreen": "findingPrescreen",
@@ -581,9 +743,9 @@ FINDING_ATTRIBUTES: dict[str, str] = {
 
 
 def _persist_finding(agent: str, applicant_id: str, finding: dict[str, Any]) -> None:
-    """Write one agent's structured finding to the case record under `findings.<agent>`.
+    """Write one agent's structured finding to the case record under `finding<Agent>`.
 
-    A conditional-free `SET` on a nested map: each agent owns exactly one key, so two agents
+    A conditional-free `SET` of a flat attribute: each agent owns exactly one key, so two agents
     writing concurrently cannot collide, and a retried tool call is naturally idempotent because
     it writes the same value to the same place.
     """
@@ -709,9 +871,8 @@ def submit_fraud_assessment(args: dict[str, Any], ctx: dict[str, Any] | None = N
                    ("determined", "velocityCritical"), ctx)
 
 
-def submit_jurisdiction(args: dict[str, Any], ctx: dict[str, Any] | None = None) -> ToolResult:
-    return _submit("router", "submit_jurisdiction", args,
-                   ("determined", "jurisdiction"), ctx)
+def submit_briefing(args: dict[str, Any], ctx: dict[str, Any] | None = None) -> ToolResult:
+    return _submit("briefing", "submit_briefing", args, ("determined", "briefing"), ctx)
 
 
 def submit_identity(args: dict[str, Any], ctx: dict[str, Any] | None = None) -> ToolResult:
@@ -731,44 +892,45 @@ TOOLS = {
     "s3_get_document": s3_get_document,
     "rekognition_compare_faces": rekognition_compare_faces,
     "velocity_check": velocity_check,
-    "sanctions_exact_match": sanctions_exact_match,
-    "sanctions_fuzzy": sanctions_fuzzy,
+    "sanctions_screen": sanctions_screen,
     "pep_lookup": pep_lookup,
     "adverse_media": adverse_media,
     "submit_document_analysis": submit_document_analysis,
     "submit_prescreen": submit_prescreen,
     "submit_fraud_assessment": submit_fraud_assessment,
-    "submit_jurisdiction": submit_jurisdiction,
+    "submit_briefing": submit_briefing,
     "submit_identity": submit_identity,
     "submit_compliance_risk": submit_compliance_risk,
     "submit_notification": submit_notification,
 }
 
 PHASE1_TOOLS = ("s3_get_document", "rekognition_compare_faces",
-                "velocity_check", "sanctions_exact_match",
+                "velocity_check", "sanctions_screen",
                 "submit_document_analysis", "submit_prescreen", "submit_fraud_assessment",
-                "submit_jurisdiction", "submit_identity")
-PHASE2_TOOLS = ("sanctions_fuzzy", "pep_lookup", "adverse_media",
+                "submit_briefing", "submit_identity")
+PHASE2_TOOLS = ("pep_lookup", "adverse_media",
                 "submit_compliance_risk", "submit_notification")
 
 #: Tools whose failure must never be read as a clean result (R25.7).
-SCREENING_TOOLS = ("sanctions_exact_match", "sanctions_fuzzy", "pep_lookup", "adverse_media")
+SCREENING_TOOLS = ("sanctions_screen", "pep_lookup", "adverse_media")
 
-#: The three output contracts (R11.13). Separated from the evidence tools because they are a
-#: different kind of thing: an evidence tool *fetches* a fact from a source, a contract tool
-#: *records* the agent's finding. Only evidence tools can be UNAVAILABLE in the R25.7 sense.
+#: The output contracts (R11.13). Separated from the evidence tools because they are a different
+#: kind of thing: an evidence tool *records* a fact it established, a contract tool *records* the
+#: agent's narrative. Only evidence tools can be UNAVAILABLE in the R25.7 sense.
 CONTRACT_TOOLS = ("submit_document_analysis", "submit_prescreen", "submit_fraud_assessment",
-                  "submit_jurisdiction", "submit_identity", "submit_compliance_risk",
+                  "submit_briefing", "submit_identity", "submit_compliance_risk",
                   "submit_notification")
 
-#: Evidence-gathering tools — the seven the talk describes as "one Lambda, seven tools".
+#: Evidence tools — "one Lambda, six tools". Seven before the two screening tools became one.
 EVIDENCE_TOOLS = tuple(t for t in TOOLS if t not in CONTRACT_TOOLS)
 
 assert set(TOOLS) == set(PHASE1_TOOLS) | set(PHASE2_TOOLS)
-assert len(EVIDENCE_TOOLS) == 7, "the seven evidence tools are a fixed set"
+assert len(EVIDENCE_TOOLS) == 6, "the six evidence tools are a fixed set"
 # One contract per agent, which is what `OutputContractNames` always listed. Building only three
 # left four agents instructed by their prompt to call a tool that did not exist.
 assert len(CONTRACT_TOOLS) == 7
 assert len(FINDING_ATTRIBUTES) == 7
-assert len(TOOLS) == 14
+assert len(TOOLS) == 13
 assert not set(CONTRACT_TOOLS) & set(SCREENING_TOOLS)
+# Every evidence tool records exactly one fact attribute.
+assert len(FACT_ATTRIBUTES) == len(EVIDENCE_TOOLS)

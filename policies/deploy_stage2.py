@@ -25,15 +25,29 @@ create/rollback cadence. This is recorded as an explicit, dated operational devi
 silent workaround: Cedar policies for this build are provisioned by `policies/deploy_stage2.py`,
 not `cdk deploy KycPolicies`; `infra/kyc/policies_stack.py` and its CDK resources exist to
 generate and validate the same shape (task 8.1's CDK test suite runs against them) but are not
-the deploy path.
+the deploy path. `make stage2` runs this script.
+
+**Policy names are unique per account, not per engine.** The API reference says so for
+`CreatePolicy`'s `name`, and a fresh account showed it: the first `cdk deploy KycPolicies` there
+asked all four engines for the same bare name at the same moment, one call went through and the
+other three got `ConflictException: Policy with the same name already exists`. That likely
+explains the "unusable name" reports below as well, where `ListPolicies` on one engine showed no
+such name: the name was held on another engine. The hash suffix avoids the clash because every
+statement names its own jurisdiction's Gateway, so no two jurisdictions share a statement, and
+so none share a name.
+
+**Enforcement mode** (`--enforcement`, default `LOG_ONLY`) uses the Gateway's spelling and is
+mapped to the policy's (`ENFORCE` -> `ACTIVE`), as `infra/kyc/policies_stack.py` does. New
+policies are created in that mode and existing ones are moved to it, so `make deploy
+ENFORCEMENT=ENFORCE` switches the Gateway attachment (stage 1) and every policy (here) together.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import sys
-import uuid
 from pathlib import Path
 
 import boto3
@@ -41,47 +55,30 @@ import boto3
 REGION = "us-east-1"
 MANIFEST_PATH = Path(__file__).resolve().parent / "generated" / "manifest.json"
 
+#: Gateway attachment mode -> per-policy `enforcementMode`. Mirrors
+#: `infra/kyc/policies_stack.py`'s POLICY_MODE_FOR_GATEWAY_MODE: the Gateway says ENFORCE, the
+#: policy says ACTIVE.
+POLICY_MODE_FOR_GATEWAY_MODE = {"LOG_ONLY": "LOG_ONLY", "ENFORCE": "ACTIVE"}
+
 
 def _bac():
     return boto3.client("bedrock-agentcore-control", region_name=REGION)
 
 
-def _create_policy_raw(bac, *, engine_id: str, name: str, definition_key: str,
-                       statement: str, description: str, validation_mode: str) -> dict:
-    """Bypasses boto3's client-side parameter validation for `definition.policy` — the
-    installed botocore model's `CreatePolicy` shape only lists `cedar`/`policyGeneration`
-    under `definition`, even though the live API accepts (and, for a `when guardrails`
-    statement, *requires*) a `policy` key alongside them, confirmed by hand-signing the same
-    request `boto3.client(...).create_policy` rejects client-side. Not a service bug — a stale
-    botocore service model for a resource this new.
-    """
-    import botocore.session
-    import urllib.error
-    import urllib.request
-    from botocore.auth import SigV4Auth
-    from botocore.awsrequest import AWSRequest
+def _require_policy_definition(bac) -> None:
+    """Guardrail statements (`when guardrails { ... }`) must be sent as `definition.policy`.
 
-    body = json.dumps({
-        "name": name,
-        "description": description,
-        "validationMode": validation_mode,
-        "definition": {definition_key: {"statement": statement}},
-        "clientToken": str(uuid.uuid4()),
-    })
-    session = botocore.session.get_session()
-    creds = session.get_credentials()
-    url = bac.meta.endpoint_url + f"/policy-engines/{engine_id}/policies"
-    request = AWSRequest(method="POST", url=url, data=body,
-                         headers={"Content-Type": "application/json"})
-    SigV4Auth(creds, "bedrock-agentcore", REGION).add_auth(request)
-    prepared = request.prepare()
-    req = urllib.request.Request(
-        prepared.url, data=prepared.body.encode(), headers=dict(prepared.headers), method="POST")
-    try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode())
-    except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"{exc.code} {exc.read().decode()}") from exc
+    They used to go out as a hand-signed request through `urllib`, because the botocore model of
+    the day listed only `cedar` and `policyGeneration` under `definition`. The pinned botocore
+    (1.43.67) has `policy`, and the hand-signed request failed certificate verification on a
+    python.org Python whose own CA store is empty (boto3 brings its own bundle), so every
+    statement now goes through the client. This stops a stale botocore with a clear message
+    instead of a client-side validation error per statement.
+    """
+    shape = bac.meta.service_model.operation_model("CreatePolicy").input_shape
+    if "policy" not in shape.members["definition"].members:
+        raise SystemExit("botocore is too old for guardrail policies (no definition.policy); "
+                         "install infra/requirements.txt (`make install`)")
 
 
 def _deployed_name(base_name: str, statement: str, salt: int) -> str:
@@ -104,8 +101,8 @@ def _deployed_name(base_name: str, statement: str, salt: int) -> str:
     yielding a fresh name for the same statement without touching anything already deployed.
 
     A statement *edit* therefore produces a new name and a new policy, leaving the old one
-    behind; that is the correct consequence of immutable names, and `_sweep_stale` handles the
-    cleanup rather than pretending an in-place update is possible.
+    behind; that is the correct consequence of immutable names. `deploy` creates the new one and
+    reports the old one rather than deleting live authorisation as a side effect.
     """
     digest = hashlib.sha256(f"{statement}|salt={salt}".encode()).hexdigest()[:6]
     return f"{base_name}{digest}"
@@ -136,7 +133,27 @@ def _existing_by_name(bac, engine_id: str) -> dict[str, dict]:
     return policies
 
 
-def deploy() -> int:
+def _statement_of(policy: dict) -> str | None:
+    """The Cedar text a policy holds (stored byte-identical to what was sent), or None when the
+    listing does not carry it."""
+    definition = policy.get("definition") or {}
+    for key in ("cedar", "policy"):
+        if isinstance(definition.get(key), dict):
+            return definition[key].get("statement")
+    return None
+
+
+def _delete(bac, engine_id: str, policy: dict) -> None:
+    bac.delete_policy(policyEngineId=engine_id, policyId=policy["policyId"])
+    bac.get_waiter("policy_deleted").wait(policyEngineId=engine_id, policyId=policy["policyId"])
+
+
+def deploy(enforcement: str = "LOG_ONLY") -> int:
+    if enforcement not in POLICY_MODE_FOR_GATEWAY_MODE:
+        print(f"error: --enforcement must be one of {tuple(POLICY_MODE_FOR_GATEWAY_MODE)}, "
+              f"got {enforcement!r}", file=sys.stderr)
+        return 1
+    mode = POLICY_MODE_FOR_GATEWAY_MODE[enforcement]
     if not MANIFEST_PATH.exists():
         print(f"error: {MANIFEST_PATH} does not exist — run "
               f"`python policies/generate.py --outputs infra/cdk-outputs.json "
@@ -145,11 +162,13 @@ def deploy() -> int:
 
     manifest: dict[str, list[dict[str, str]]] = json.loads(MANIFEST_PATH.read_text())
     bac = _bac()
-    created, skipped, failed = 0, 0, 0
+    _require_policy_definition(bac)
+    created, skipped, updated, failed, older = 0, 0, 0, 0, 0
 
     for code, entries in sorted(manifest.items()):
         engine_id = entries[0]["policyEngineArn"].rsplit("/", 1)[-1]
-        print(f"=== {code.upper()} ({engine_id}) — {len(entries)} statements ===")
+        print(f"=== {code.upper()} ({engine_id}) — {len(entries)} statements, "
+              f"enforcementMode {mode} ===")
 
         for entry in entries:
             base_name = entry["name"]
@@ -162,17 +181,47 @@ def deploy() -> int:
             # Matched by prefix, not exact name: the deployed name carries a hash suffix, and a
             # previous run that had to bump `salt` produced a different suffix for the same
             # statement. An exact-name check would miss it and create a duplicate policy
-            # authorising the same tool twice.
-            already = [
-                p for name, p in existing.items()
-                if name.startswith(base_name) and p["status"] in ("ACTIVE", "CREATING")
-            ]
+            # authorising the same tool twice. Exactly the base name plus the 6-hex suffix, so a
+            # base name that happens to be a prefix of another statement's name never matches.
+            mine = [p for name, p in existing.items()
+                    if name.startswith(base_name) and len(name) == len(base_name) + 6]
+            # A failed attempt has no effect, but it holds its name (names are unique per
+            # account) and a re-run would trip over it. Remove it before trying again.
+            for p in [p for p in mine if p["status"] == "CREATE_FAILED"]:
+                _delete(bac, engine_id, p)
+                print(f"  {p['name']}: removed an earlier failed attempt")
+            live = [p for p in mine if p["status"] in ("ACTIVE", "CREATING", "UPDATING")]
+            # Present only with this exact statement. Under the same base name with other text
+            # it is an older version: reported, not counted, so an edited statement is created
+            # instead of being skipped as "already present".
+            already = [p for p in live if _statement_of(p) in (entry["cedar"], None)]
+            for p in live:
+                if p not in already:
+                    print(f"  {p['name']}: an older version of {base_name} is still on the "
+                          f"engine; delete it once the new one is ACTIVE")
+                    older += 1
             if already:
-                if already[0]["status"] == "CREATING":
+                present = already[0]
+                if present["status"] in ("CREATING", "UPDATING"):
                     bac.get_waiter("policy_active").wait(
-                        policyEngineId=engine_id, policyId=already[0]["policyId"])
-                print(f"  {base_name}: already present as {already[0]['name']}, skipping")
-                skipped += 1
+                        policyEngineId=engine_id, policyId=present["policyId"])
+                if present.get("enforcementMode") == mode:
+                    print(f"  {base_name}: already present as {present['name']}, skipping")
+                    skipped += 1
+                    continue
+                # Same statement, other mode: move it rather than create a second policy for
+                # the same tool. The Gateway attachment moves in stage 1 with the same switch.
+                try:
+                    bac.update_policy(policyEngineId=engine_id, policyId=present["policyId"],
+                                      enforcementMode=mode)
+                    bac.get_waiter("policy_active").wait(
+                        policyEngineId=engine_id, policyId=present["policyId"])
+                    print(f"  {present['name']}: enforcementMode "
+                          f"{present.get('enforcementMode')} -> {mode}")
+                    updated += 1
+                except Exception as exc:  # noqa: BLE001 - reported and counted, then exit 1
+                    print(f"  {present['name']}: MODE CHANGE FAILED — {exc}")
+                    failed += 1
                 continue
 
             is_guardrail = entry["kind"] != "authorization"
@@ -196,17 +245,12 @@ def deploy() -> int:
             for salt in range(6):
                 name = _deployed_name(base_name, entry["cedar"], salt)
                 try:
-                    if is_guardrail:
-                        resp = _create_policy_raw(
-                            bac, engine_id=engine_id, name=name, definition_key=definition_key,
-                            statement=entry["cedar"], description=description,
-                            validation_mode=validation_mode)
-                    else:
-                        resp = bac.create_policy(
-                            policyEngineId=engine_id, name=name,
-                            definition={definition_key: {"statement": entry["cedar"]}},
-                            description=description, validationMode=validation_mode,
-                        )
+                    resp = bac.create_policy(
+                        policyEngineId=engine_id, name=name,
+                        definition={definition_key: {"statement": entry["cedar"]}},
+                        description=description, validationMode=validation_mode,
+                        enforcementMode=mode,
+                    )
                     policy_id = resp["policyId"]
                     break
                 except Exception as exc:
@@ -230,10 +274,30 @@ def deploy() -> int:
                 print(f"  {name}: did not reach ACTIVE — status={got['status']} "
                       f"reasons={got.get('statusReasons')}")
                 failed += 1
+                if got["status"] == "CREATE_FAILED":
+                    # It has no effect and would hold the name: leave the engine as it was.
+                    _delete(bac, engine_id, got)
 
-    print(f"\ncreated={created} skipped={skipped} failed={failed}")
+        # Policies of a statement the manifest no longer has (a removed kind or tool). Reported,
+        # not deleted, for the same reason as an older version above.
+        bases = [e["name"] for e in entries]
+        for name in sorted(_existing_by_name(bac, engine_id)):
+            if not any(name.startswith(b) and len(name) == len(b) + 6 for b in bases):
+                print(f"  {name}: on the engine but not in the manifest")
+                older += 1
+
+    print(f"\ncreated={created} skipped={skipped} updated={updated} failed={failed} "
+          f"older-versions-left={older}")
     return 1 if failed else 0
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Create the Cedar policies in the manifest.")
+    parser.add_argument("--enforcement", default="LOG_ONLY",
+                        choices=tuple(POLICY_MODE_FOR_GATEWAY_MODE),
+                        help="the Gateway's mode; every policy is put in the matching mode")
+    return deploy(parser.parse_args(argv).enforcement)
+
+
 if __name__ == "__main__":
-    sys.exit(deploy())
+    sys.exit(main())

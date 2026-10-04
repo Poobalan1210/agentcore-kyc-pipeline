@@ -1,13 +1,24 @@
 """Lambda entry point for the decision engine — task 6.1.
 
 This is the **only** impure module in the package, and it is deliberately thin: parse, delegate,
-serialise. All judgement lives in `tiering.py`, `outcomes.py` and `edge_cases.py`, which import
-nothing that can touch a clock, a network or a disk. `test_tiering.TestPurity` enforces that by
-parsing the source, and it excludes this file by name.
+serialise. All judgement lives in `facts.py`, `tiering.py`, `outcomes.py`, `edge_cases.py`,
+`identity_match.py` and `lifecycle.py`, which import nothing that can touch a clock, a network or a
+disk. `test_tiering.TestPurity` enforces that by parsing the source, and it excludes this file by
+name.
 
 Named `decision_handler.py` rather than `handler.py` because `tools/handler.py` already exists and
 both directories sit on `sys.path`. Two modules called `handler` would resolve by path order,
 which is exactly the kind of dependency that works until someone reorders a config file.
+
+**What the engine reads.** The state machine passes `facts`: the results the evidence tools
+recorded on the case record. The engine derives every tier input from those (`facts.py`) and reads
+nothing an agent said. Agent results arrive only as an availability signal — whether each agent
+ran and returned anything — never as a source of values. The prose-parsing path that used to sit
+here (`signals.py`) is gone: it made outcomes depend on a model's wording, and an agent that called
+an unavailable source "no match" could have approved someone.
+
+Callers that pass explicit tier fields instead of `facts` (the unit tests, replay tooling) are held
+to the strict rule: every field required, nothing defaulted.
 
 Keeping the boundary this sharp is what makes R4.10's "1,000 identical inputs, 1,000 identical
 outputs" a property of the code rather than an observation about one run.
@@ -19,24 +30,24 @@ import json
 from typing import Any
 
 from edge_cases import EdgeFacts, evaluate_edge_cases
+from facts import read_facts
+from identity_match import compare as compare_identity
+from identity_match import verdicts as identity_verdicts
+from lifecycle import Day0Snapshot, history_sort_key, idempotency_name, reassess
 from models import (
     FullInputs,
     LifecycleDecision,
-    RiskEvent,
-    RiskEventSeverity,
     MatchStrength,
     PepStatus,
     PreliminaryInputs,
+    RiskEvent,
+    RiskEventSeverity,
     RiskTier,
     ScreeningHit,
     Severity,
     VelocitySignals,
 )
 from outcomes import select_phase1_outcome, select_phase2_outcome
-from lifecycle import Day0Snapshot, history_sort_key, idempotency_name, reassess
-from signals import derive as derive_signals
-from signals import from_findings as signals_from_findings
-from identity_match import evaluate as evaluate_identity
 from tiering import full_tier, preliminary_tier, tier_action
 
 
@@ -51,88 +62,79 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
     phase = event.get("phase")
     if phase not in (1, 2, 3, "1", "2", "3"):
         raise InputError(f"phase must be 1, 2 or 3, got {phase!r}")
+    phase = int(phase)
 
     agent_results = event.get("agentResults") or {}
     if not isinstance(agent_results, dict):
         raise InputError("agentResults must be an object keyed by agent name")
 
-    verdicts = evaluate_edge_cases(_edge_facts_from(event.get("edgeFacts") or {}))
-
-    # Declared identity versus what the document proves. Appended to the mandated edge-case
-    # verdicts rather than folded into the fifteen-rule table, because the requirements document
-    # has no clause for this comparison — see `identity_match`'s docstring, which records it as a
-    # spec gap rather than presenting it as an implemented requirement.
-    #
-    # Read from the case record, not from an agent's finding, and that is the point: the MRZ check
-    # digits make this the one part of document extraction that is *verified*, and routing it
-    # through a model's prose would turn a checkable fact into a paraphrase.
-    identity_comparison, identity_verdicts = evaluate_identity(
-        event.get("declaredIdentity"), event.get("documentExtraction"))
-    verdicts = verdicts + identity_verdicts
-
-    # Fill only genuine gaps. An explicitly supplied field always wins, so a caller that knows a
-    # signal is never overridden by prose. Anything that cannot be established is added to
-    # `agentResults` as an explicit UNAVAILABLE marker rather than defaulted — which routes the
-    # case to a human through the normal fail-closed path instead of inventing a safe-looking value.
     event = dict(event)
     agent_results = dict(agent_results)
+    declared = _plain_mapping(event.get("declaredIdentity"))
 
-    # Derivation is a fallback for agents that replied unreadably — NOT a licence to omit inputs.
-    # With no `agentResults` at all there is nothing to derive from, so the strict
-    # every-field-required rule stands and a missing field is still an InputError. Relaxing that
-    # would let a caller send almost nothing and receive a confident decision.
-    # Structured findings first (R11.13). Each was schema-validated by the service before it was
-    # persisted, so its shape is not the model's choice — which is what makes the outcome
-    # reproducible. Prose derivation is only a fallback for agents that recorded nothing, and
-    # F-89 is the measurement of why it cannot be the primary path.
-    findings = event.get("findings") or {}
-    if not isinstance(findings, dict):
-        raise InputError("findings must be an object keyed by agent name")
+    reading = None
+    raw_facts = event.get("facts")
+    if raw_facts is not None:
+        if not isinstance(raw_facts, dict):
+            raise InputError("facts must be an object keyed by fact name")
+        as_of = event.get("asOf")
+        if phase == 1 and not as_of:
+            # Expiry and age are computed against it. Without it the person rules cannot run, and a
+            # decision that silently skipped them would look complete.
+            raise InputError("asOf is required when deciding from facts")
+        current_list = event.get("currentListVersion")
+        if current_list is not None and (not isinstance(current_list, str)
+                                         or not current_list.strip()):
+            raise InputError("currentListVersion must be a non-empty string when supplied")
+        reading = read_facts(
+            phase=phase, facts=raw_facts, declared=declared, as_of=as_of,
+            phase_started_at=event.get("phaseStartedAt"),
+            dispositions=event.get("screeningDispositions"),
+            live_failures=event.get("livenessFailures"),
+            current_list_version=current_list)
+        # Explicitly supplied fields win: a caller that knows a value (Phase 2 carries the
+        # document confidence Phase 1 decided on) is never overridden by a re-derivation.
+        for key, value in reading.inputs.items():
+            event.setdefault(key, value)
+        # A fact that could not be used is an agent that did not deliver. UNAVAILABLE, so the case
+        # reaches a human through the ordinary fail-closed path rather than a default.
+        for agent in reading.undetermined:
+            agent_results[agent] = {"error": "SIGNAL_NOT_DETERMINED"}
+        if reading.undetermined:
+            # The tier still has to compute, so the missing fields get placeholders. These never
+            # decide anything: every undetermined agent is UNAVAILABLE, and the outcome tables route
+            # any unavailable agent to MANUAL_REVIEW. `preScreenMatched` is False on purpose:
+            # PROHIBITED is evaluated before the unavailable check, and a placeholder of True would
+            # reject a real applicant on a missing record. Reviewing on a gap beats rejecting on one.
+            event.setdefault("preScreenMatched", False)
+            event.setdefault("documentConfidence", 0.0)
+            event.setdefault("velocitySignals", {"critical": False})
+            event.setdefault("pepStatus", "NONE")
+            event.setdefault("adverseMediaSeverity", "NONE")
 
-    derived, undetermined = signals_from_findings(findings) if findings else ({}, ())
-    if undetermined and agent_results:
-        # Only the agents the contract did not cover fall back to prose.
-        fallback, still_undetermined = derive_signals(
-            {a: agent_results[a] for a in undetermined if a in agent_results})
-        derived = {**fallback, **derived}
-        undetermined = tuple(a for a in undetermined
-                             if a in still_undetermined or a not in agent_results)
-    elif not findings:
-        derived, undetermined = (derive_signals(agent_results) if agent_results else ({}, ()))
+    explicit_edge = _edge_fields(event.get("edgeFacts") or {})
+    derived_edge = _edge_fields(reading.edge_facts) if reading else {}
+    # Explicit edge facts win for the same reason explicit tier fields do.
+    verdicts = evaluate_edge_cases(EdgeFacts(**{**derived_edge, **explicit_edge}))
 
-    for key, value in derived.items():
-        event.setdefault(key, value)
-    # Marked unconditionally, not only when the agent already appears in `agentResults`. An earlier
-    # version guarded on membership, which meant an agent that recorded no finding *and* returned
-    # no text was silently absent from the unavailable list — so the case tiered on placeholders
-    # and could approve. An agent that did not report is exactly the one that must reach a human.
-    for agent in undetermined:
-        agent_results[agent] = {"error": "SIGNAL_NOT_DETERMINED"}
-    if undetermined:
-        # The tier still has to compute, so the remaining fields get placeholders. These never
-        # decide anything: each undetermined agent is now UNAVAILABLE, and `select_phase1_outcome`
-        # routes any unavailable agent to MANUAL_REVIEW.
-        #
-        # The values are chosen so that if that ordering were ever changed, the failure would be
-        # conservative rather than dangerous. `preScreenMatched` is **False** on purpose even
-        # though False is the permissive reading: PROHIBITED is evaluated *before* the unavailable
-        # check, so a placeholder of True would reject a real applicant on a parsing failure.
-        # Rejecting on a guess is worse than reviewing on one.
-        event.setdefault("preScreenMatched", False)
-        event.setdefault("documentConfidence", 0.0)
-        event.setdefault("velocitySignals", {"critical": False})
-        event.setdefault("pepStatus", "NONE")
-        event.setdefault("adverseMediaSeverity", "NONE")
+    # Declared identity versus what the document proves. Read from the recorded extraction, never
+    # from an agent's paraphrase of it. Judged only in Phase 1, which owns identity: a later phase
+    # re-raising a mismatch a reviewer already resolved would send the same case round twice.
+    extraction = reading.extraction if reading else event.get("documentExtraction")
+    identity_comparison = compare_identity(declared or event.get("declaredIdentity"),
+                                           extraction)
+    if phase == 1:
+        verdicts = verdicts + identity_verdicts(identity_comparison)
+        if reading:
+            verdicts = verdicts + reading.verdicts
 
-    if str(phase) == "3":
+    if phase == 3:
         # Lifecycle re-assessment (G-01). Returns early because it shares nothing with the
-        # onboarding phases beyond the tier calculation: there is no Phase-1 outcome table to
-        # consult, no edge-case list to apply, and — critically — nothing to update. The result is
-        # a new decision version to be APPENDED, so folding it into the fall-through below would
-        # invite exactly the mutation this flow exists to avoid.
-        return _phase3(event, decided_at=str(event.get("decidedAt") or ""))
+        # onboarding phases beyond the tier calculation, and — critically — nothing is updated: the
+        # result is a new decision version to be APPENDED.
+        return _phase3(event, reading=reading)
 
-    if str(phase) == "1":
+    if phase == 1:
         tier = preliminary_tier(_preliminary_from(event))
         decision = select_phase1_outcome(
             tier=tier, agent_results=agent_results, edge_verdicts=verdicts)
@@ -143,6 +145,7 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
 
     action = tier_action(tier.tier)
     return {
+        "phase": phase,
         "outcome": decision.outcome.value,
         "rule": decision.rule,
         "reasonCode": decision.reason_code,
@@ -162,18 +165,19 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
         # comparison ran and matched, not only when it failed — "no finding" and "not checked" are
         # different facts, and only the audit record can tell them apart later (R18.2).
         "identityMatch": identity_comparison.to_dict(),
+        # Which recorded facts the decision rested on, their status and when they were recorded.
+        "factsRead": reading.summary if reading else None,
     }
 
 
-def _phase3(event: dict[str, Any], *, decided_at: str) -> dict[str, Any]:
+def _phase3(event: dict[str, Any], *, reading) -> dict[str, Any]:
     """Re-assess an approved customer against a risk event, and return a row to APPEND.
 
-    The response deliberately carries `historySortKey` and `idempotencyName` rather than leaving
-    the caller to compose them. Both are correctness-critical — the sort key is what keeps the
-    history append-only and ordered, and the execution name is what makes a replayed event collapse
-    onto the original run — so deriving them here keeps them in tested code instead of in a
-    JSONata expression in the state machine, which is where the equivalent logic was lost before
-    (see `signals.py` on why prose in the ASL was the wrong place for a decision).
+    The response carries `historySortKey` and `idempotencyName` rather than leaving the caller to
+    compose them. Both are correctness-critical — the sort key is what makes a replayed event land
+    on the same row (and be refused), and the execution name is what collapses a replay onto the
+    original run — so they are derived here, in tested code, from the event itself rather than from
+    anything that differs between two deliveries of it.
     """
     raw_event = event.get("riskEvent") or {}
     if not isinstance(raw_event, dict):
@@ -213,8 +217,13 @@ def _phase3(event: dict[str, Any], *, decided_at: str) -> dict[str, Any]:
 
     # No fresh evidence means the re-screen did not complete. Passing None is the honest signal;
     # `reassess` turns it into SYSTEM_ERROR and a human, never "risk unchanged".
-    new_evidence = _full_from(event) if event.get("evidenceComplete") else None
+    if reading is not None:
+        complete = not reading.undetermined
+    else:
+        complete = bool(event.get("evidenceComplete"))
+    new_evidence = _full_from(event) if complete else None
 
+    decided_at = str(event.get("decidedAt") or event.get("asOf") or "")
     decision: LifecycleDecision = reassess(
         day0=day0, event=risk_event, new_evidence=new_evidence, decided_at=decided_at)
 
@@ -229,14 +238,20 @@ def _phase3(event: dict[str, Any], *, decided_at: str) -> dict[str, Any]:
         "eventId": decision.event_id,
         "nextReviewDays": decision.next_review_days,
         "explanation": decision.rationale,
+        "reKycInterval": _interval_for(decision.new_tier),
         # Composed here so the state machine cannot get them subtly wrong.
-        "historySortKey": history_sort_key(decision.decided_at, decision.version),
+        "historySortKey": history_sort_key(risk_event.occurred_at, risk_event.event_id),
         "idempotencyName": idempotency_name(risk_event.customer_id, risk_event.event_id),
         # The day-zero decision is echoed unchanged as a standing assertion that this flow read it
         # and did not edit it.
         "day0Preserved": {"caseId": day0.case_id, "outcome": day0.outcome,
                           "decidedAt": day0.decided_at, "tier": day0.tier.value},
+        "factsRead": reading.summary if reading else None,
     }
+
+
+def _interval_for(tier: RiskTier) -> str | None:
+    return tier_action(tier)["re_kyc_interval"]
 
 
 # --- parsing ------------------------------------------------------------------------------
@@ -246,6 +261,14 @@ def _phase3(event: dict[str, Any], *, decided_at: str) -> dict[str, Any]:
 # is the same class of error as reading an empty agent result as a clean pass.
 
 
+def _plain_mapping(raw: Any) -> dict[str, Any] | None:
+    """Accept a plain object or the DynamoDB-typed `{"M": {"k": {"S": ...}}}` shape."""
+    if isinstance(raw, dict) and set(raw) == {"M"} and isinstance(raw["M"], dict):
+        return {k: (v.get("S") if isinstance(v, dict) and "S" in v else v)
+                for k, v in raw["M"].items()}
+    return raw if isinstance(raw, dict) else None
+
+
 def _preliminary_from(event: dict[str, Any]) -> PreliminaryInputs:
     return PreliminaryInputs(
         jurisdiction_risk=_enum(RiskTier, event, "jurisdictionRisk"),
@@ -253,6 +276,7 @@ def _preliminary_from(event: dict[str, Any]) -> PreliminaryInputs:
         document_confidence=_float(event, "documentConfidence"),
         velocity_signals=_velocity(event),
         product_applied=_str(event, "productApplied"),
+        screening_hits=_hits(event),
     )
 
 
@@ -303,8 +327,8 @@ _EDGE_FIELDS: dict[str, str] = {
 _EDGE_TUPLE_FIELDS = {"quality_defects", "nationalities"}
 
 
-def _edge_facts_from(raw: dict[str, Any]) -> EdgeFacts:
-    """Parse the edge-case facts. Absent means "not established", never False (see `EdgeFacts`)."""
+def _edge_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    """Parse edge-case facts to EdgeFacts kwargs. Absent means "not established", never False."""
     if not isinstance(raw, dict):
         raise InputError("edgeFacts must be an object")
     unknown = set(raw) - set(_EDGE_FIELDS)
@@ -327,7 +351,12 @@ def _edge_facts_from(raw: dict[str, Any]) -> EdgeFacts:
                 str(k).lower(): _risk_tier(str(k), v) for k, v in value.items()}
         else:
             kwargs[field_name] = value
-    return EdgeFacts(**kwargs)
+    return kwargs
+
+
+def _edge_facts_from(raw: dict[str, Any]) -> EdgeFacts:
+    """Kept for callers that parse edge facts on their own."""
+    return EdgeFacts(**_edge_fields(raw))
 
 
 def _risk_tier(code: str, value: Any) -> RiskTier:

@@ -52,7 +52,7 @@ class TestValidation:
         assert InvalidReason.UNKNOWN_ACTION in outcome.invalid.reasons
 
     def test_an_unknown_phase_is_refused(self):
-        outcome = resolve(submission=submission(phase="phase3"), case=case_record())
+        outcome = resolve(submission=submission(phase="phase9"), case=case_record())
         assert InvalidReason.UNKNOWN_PHASE in outcome.invalid.reasons
 
     def test_a_naive_timestamp_is_refused(self):
@@ -406,3 +406,162 @@ class TestQueueAges:
         case = QueuedCase(case_id="A", enqueued_at=datetime(2026, 8, 9, 11, 0, 0))
         with pytest.raises(ValueError):
             case.age_seconds(now=NOW)
+
+
+# ------------------------------------------------------------------ phases 2 and 3, dispositions
+
+import json  # noqa: E402
+
+from decisions import (  # noqa: E402
+    TARGET_STATES,
+    clearable_alerts,
+    confirmed_matches,
+    day_zero_state,
+    screening_dispositions,
+    target_state,
+)
+
+
+def _screening(*hits: tuple[str, str], list_version: str = "SYNTHETIC-2026-10-01") -> str:
+    """A screening fact as the tool records it: a JSON string on the case."""
+    return json.dumps({"performed": True, "listVersion": list_version,
+                       "hits": [{"entryId": e, "classification": c} for e, c in hits]})
+
+
+def _case(phase: str = "phase1", **extra) -> dict:
+    case = case_record(phase=phase)
+    case.update(extra)
+    return case
+
+
+class TestEveryPhaseHasItsOwnTargets:
+    """The state machine checks the state the reviewer left the case in before acting on it, so
+    the two must agree phase by phase (`infra/kyc/asl.py`)."""
+
+    @pytest.mark.parametrize("phase,action,state", [
+        ("phase1", ReviewAction.APPROVE, "PROVISIONAL"),
+        ("phase1", ReviewAction.REJECT, "DECIDED"),
+        ("phase1", ReviewAction.REQUEST_STEP_UP, "AWAITING_APPLICANT"),
+        ("phase2", ReviewAction.APPROVE, "MONITORING"),
+        ("phase2", ReviewAction.REJECT, "FROZEN"),
+        ("phase2", ReviewAction.REQUEST_STEP_UP, "RESTRICTED"),
+        ("phase3", ReviewAction.REJECT, "FROZEN"),
+    ])
+    def test_targets(self, phase, action, state):
+        decision = build_decision(submission(phase=phase, action=action), _case(phase))
+        assert decision.target_state == state
+
+    @pytest.mark.parametrize("phase2_outcome,state", [
+        ("FULL_APPROVE_STANDARD", "MONITORING"),
+        ("FULL_APPROVE_ENHANCED_MONITORING", "MONITORING"),
+        ("RESTRICT_FURTHER", "RESTRICTED"),
+        ("MANUAL_REVIEW", "PROVISIONAL"),
+        (None, "PROVISIONAL"),
+    ])
+    def test_a_lifecycle_clearance_restores_the_day_zero_state(self, phase2_outcome, state):
+        case = _case("phase3")
+        if phase2_outcome:
+            case["phase2"] = {"outcome": phase2_outcome}
+        assert day_zero_state(case) == state
+        assert target_state(ReviewAction.APPROVE, "phase3", case) == state
+
+    def test_a_lifecycle_review_has_no_step_up(self):
+        """Nothing in Phase 3 asks the customer for anything; the execution would have nowhere to
+        go, so the console is told no rather than the workflow failing."""
+        outcome = resolve(submission=submission(phase="phase3",
+                                                action=ReviewAction.REQUEST_STEP_UP),
+                          case=_case("phase3"))
+        assert outcome.resolution is Resolution.INVALID
+        assert InvalidReason.ACTION_NOT_AVAILABLE in outcome.invalid.reasons
+
+    def test_phase3_is_reviewable(self):
+        outcome = resolve(submission=submission(phase="phase3", action=ReviewAction.REJECT),
+                          case=_case("phase3"))
+        assert outcome.resolution is Resolution.ACCEPT
+
+    def test_every_phase_table_covers_what_it_offers(self):
+        assert set(TARGET_STATES["phase1"]) == set(ReviewAction)
+        assert set(TARGET_STATES["phase2"]) == set(ReviewAction)
+        assert set(TARGET_STATES["phase3"]) == {ReviewAction.REJECT}
+
+
+class TestConfirmedMatchesAreNeverApproved:
+    def test_a_confirmed_match_is_refused_even_without_a_tier(self):
+        """A pipeline that degraded before the rules ran reaches review with no tier at all. The
+        recorded screening is checked directly, or a confirmed match was one click from an open
+        account."""
+        case = _case(factScreening=_screening(("SYN-0001", "CONFIRMED")))
+        case["phase1"].pop("preliminaryTier")
+        outcome = resolve(submission=submission(), case=case)
+        assert outcome.resolution is Resolution.INVALID
+        assert InvalidReason.PROHIBITED_TIER_NOT_OVERRIDABLE in outcome.invalid.reasons
+        assert "SYN-0001" in outcome.detail
+
+    def test_reject_is_still_available(self):
+        case = _case(factScreening=_screening(("SYN-0001", "CONFIRMED")))
+        outcome = resolve(submission=submission(action=ReviewAction.REJECT), case=case)
+        assert outcome.resolution is Resolution.ACCEPT
+
+    def test_a_possible_alert_does_not_block_approval(self):
+        case = _case(factScreening=_screening(("SYN-0106", "POSSIBLE")))
+        assert resolve(submission=submission(), case=case).resolution is Resolution.ACCEPT
+
+    def test_matches_are_read_from_a_string_or_a_map(self):
+        as_map = {"hits": [{"entryId": "SYN-0001", "classification": "CONFIRMED"}]}
+        assert confirmed_matches({"factScreening": as_map}) == ("SYN-0001",)
+        assert confirmed_matches({"factScreening": "{not json"}) == ()
+        assert confirmed_matches(None) == ()
+
+
+class TestApprovalClearsTheAlertsItResolves:
+    def test_only_probable_and_possible_alerts_are_cleared(self):
+        case = _case(factScreening=_screening(
+            ("SYN-0106", "POSSIBLE"), ("SYN-0006", "PROBABLE"), ("SYN-0001", "NO_MATCH")))
+        decision = build_decision(submission(), case)
+        assert decision.cleared_alerts == ("SYN-0006", "SYN-0106")
+        assert clearable_alerts(case) == ("SYN-0006", "SYN-0106")
+
+    def test_reject_and_step_up_clear_nothing(self):
+        case = _case(factScreening=_screening(("SYN-0106", "POSSIBLE")))
+        for action in (ReviewAction.REJECT, ReviewAction.REQUEST_STEP_UP):
+            assert build_decision(submission(action=action), case).cleared_alerts == ()
+
+    def test_the_write_merges_dispositions_in_the_same_update(self):
+        """An alert is cleared exactly when the decision that cleared it lands."""
+        existing = json.dumps([{"entryId": "SYN-0002", "phase": "phase1"}])
+        case = _case("phase2", factScreening=_screening(("SYN-0106", "POSSIBLE"),
+                                                        ("SYN-0002", "POSSIBLE")),
+                     screeningDispositions=existing)
+        sub = submission(phase="phase2")
+        decision = build_decision(sub, case)
+        write = build_conditional_write(submission=sub, decision=decision, table_name=TABLE,
+                                        case=case)
+        assert "#dispositions = :dispositions" in write.update_expression
+        stored = json.loads(write.expression_attribute_values[":dispositions"])
+        assert [d["entryId"] for d in stored] == ["SYN-0002", "SYN-0106"]
+        added = stored[1]
+        assert added["reviewerId"] == "reviewer-a" and added["phase"] == "phase2"
+        assert added["listVersion"] == "SYNTHETIC-2026-10-01"
+        assert added["classification"] == "POSSIBLE"
+
+    def test_no_alerts_means_no_dispositions_write(self):
+        sub = submission()
+        write = build_conditional_write(submission=sub, decision=build_decision(sub, _case()),
+                                        table_name=TABLE, case=_case())
+        assert "dispositions" not in write.update_expression
+
+    def test_the_resume_payload_names_the_cleared_alerts(self):
+        case = _case(factScreening=_screening(("SYN-0106", "POSSIBLE")))
+        outcome = resolve(submission=submission(), case=case)
+        assert resume_payload(outcome)["reviewOutcome"]["clearedAlerts"] == ["SYN-0106"]
+
+    def test_the_cleared_alerts_round_trip_with_the_decision(self):
+        case = _case(factScreening=_screening(("SYN-0106", "POSSIBLE")))
+        decision = build_decision(submission(), case)
+        assert existing_review(case_record(review=decision.to_item()), "phase1") == decision
+
+    def test_a_malformed_dispositions_attribute_is_replaced_not_crashed_on(self):
+        case = _case(factScreening=_screening(("SYN-0106", "POSSIBLE")),
+                     screeningDispositions="{oops")
+        merged = screening_dispositions(case, build_decision(submission(), case))
+        assert [d["entryId"] for d in merged] == ["SYN-0106"]

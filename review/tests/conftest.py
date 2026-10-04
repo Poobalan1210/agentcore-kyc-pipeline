@@ -134,6 +134,8 @@ class FakeDynamo:
         item["state"] = values[":target"]
         item.setdefault("transitions", [])
         item["transitions"].extend(copy.deepcopy(values[":transition"]))
+        if "#dispositions" in names:
+            item[names["#dispositions"]] = values[":dispositions"]
         return {}
 
 

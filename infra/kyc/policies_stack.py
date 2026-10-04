@@ -43,11 +43,21 @@ from aws_cdk import RemovalPolicy, Stack
 from constructs import Construct
 
 
+#: Gateway attachment mode -> per-policy `EnforcementMode`. The two resources spell the same
+#: decision differently: the Gateway says ENFORCE, the policy says ACTIVE (CloudFormation schema).
+POLICY_MODE_FOR_GATEWAY_MODE = {"LOG_ONLY": "LOG_ONLY", "ENFORCE": "ACTIVE"}
+
+
 class PoliciesStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, *,
                  manifest_path: Path,
+                 policy_enforcement: str = "LOG_ONLY",
                  **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
+        if policy_enforcement not in POLICY_MODE_FOR_GATEWAY_MODE:
+            raise ValueError(f"policy_enforcement must be one of "
+                             f"{tuple(POLICY_MODE_FOR_GATEWAY_MODE)}, got {policy_enforcement!r}")
+        self.enforcement_mode = POLICY_MODE_FOR_GATEWAY_MODE[policy_enforcement]
 
         if not manifest_path.exists():
             raise FileNotFoundError(
@@ -119,9 +129,9 @@ class PoliciesStack(Stack):
                     f"not this resource."
                 ),
                 "Definition": {definition_key: {"Statement": entry["cedar"]}},
-                # R14.6: every statement starts LOG_ONLY, promoted to ACTIVE only after
-                # thresholds are tuned against observed scores, no later than 2026-10-24.
-                "EnforcementMode": "LOG_ONLY",
+                # R14.6: LOG_ONLY until the logged decisions have been checked, then ACTIVE —
+                # set together with the Gateway's attachment mode by `-c policyEnforcement`.
+                "EnforcementMode": self.enforcement_mode,
                 "ValidationMode": validation_mode,
             },
         )

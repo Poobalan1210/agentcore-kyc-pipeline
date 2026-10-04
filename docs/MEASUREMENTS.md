@@ -244,3 +244,27 @@ These cost real time to discover and are recorded so nobody repeats them.
 | **Memory really is on by default** | `agentcore add harness --no-memory` exists to *"Skip auto-creating memory"* (F-66). With the flag, `harness.json` omits the `memory` key entirely |
 | **`lifecycleConfig` is settable at create** | `idleRuntimeSessionTimeout` and `maxLifetime` both accepted, so R11.14's 900-second cap is implementable today |
 | **Two packages, one name** | `agentcore` CLI ships CDK constructs at `v0.1.0-alpha.36`; `@aws-cdk/aws-bedrock-agentcore-alpha` is separately at `2.263.0-alpha.0` with 55 published versions. Pin one and say which (A-16) |
+
+---
+
+## Branch `reinvent-ready` — rehearsal figures · NOT YET MEASURED
+
+This branch has not been deployed, so it has no live figures yet, and this section stays empty
+until it does: nothing here may be an estimate. After the first rehearsal in the deployed
+account, paste the output of:
+
+```bash
+make measure                                   # time to decision p50/p95, agent latency, tokens
+./.venv/bin/python scripts/measure.py --price-per-mtok <blended USD per 1M tokens>   # with cost
+make export                                    # per-state durations: where the seconds go
+make check-policies                            # Cedar decisions before any ENFORCE switch
+```
+
+and, for figures under load, `scripts/loadtest.py` (it writes; read its docstring first) followed
+by `scripts/measure.py --prefix APP-LOADTEST-<run>`.
+
+What *is* measured on this branch, offline (`make evals`): each persona reaches its act's outcome
+through the real tools and rules; 1,000 replays of each recorded event give one output; misleading
+agent replies change no decision; a tool forced unavailable, a face that does not match and a
+contradicted date of birth each route to a person. These are properties of the code, not
+latencies, and say nothing about time to decision.

@@ -29,8 +29,14 @@ HARNESS_ROLES = {
     "prescreen": "arn:aws:iam::123456789012:role/kyc90-harness-prescreen",
     "compliance": "arn:aws:iam::123456789012:role/kyc90-harness-compliance",
     "notify": "arn:aws:iam::123456789012:role/kyc90-harness-notify",
-    "router": "arn:aws:iam::123456789012:role/kyc90-harness-router",
+    "briefing": "arn:aws:iam::123456789012:role/kyc90-harness-briefing",
 }
+
+
+#: The three screening tools, the only Gateway actions that declare `input.name`.
+SCREENING_SCOPE = ('action in [AgentCore::Action::"AdverseMedia___adverse_media", '
+                   'AgentCore::Action::"PepList___pep_lookup", '
+                   'AgentCore::Action::"SanctionsScreen___sanctions_screen"]')
 
 
 def _texts(statements: list[Statement]) -> list[str]:
@@ -100,29 +106,37 @@ class TestAuthorizationStatements:
             assert f'resource == AgentCore::Gateway::"{GATEWAY_ARN}"' in s.cedar
             assert "*" not in s.cedar
 
-    def test_router_and_notify_have_no_tools_so_get_no_statement(self):
-        """design §5.1 — Router and Notify use no tools; they must not appear as a principal in
-        any permit statement, since an agent with no tools needs no authorisation surface."""
+    def test_briefing_and_notify_have_no_tools_so_get_no_statement(self):
+        """Briefing and Notify use no tools; they must not appear as a principal in any permit
+        statement, since an agent with no tools needs no authorisation surface."""
         joined = "\n".join(_texts(authorization_statements(
             gateway_arn=GATEWAY_ARN, harness_roles=HARNESS_ROLES)))
-        assert "kyc90-harness-router" not in joined
+        assert "kyc90-harness-briefing" not in joined
         assert "kyc90-harness-notify" not in joined
 
     def test_an_agent_with_multiple_tools_gets_one_statement_each(self):
-        """Compliance Risk has three tools (sanctions_fuzzy, pep_lookup, adverse_media) — one
-        permit statement per tool, not one permit trying to cover all three."""
+        """Compliance Risk has two tools (pep_lookup, adverse_media) — one permit statement per
+        tool, not one permit trying to cover both."""
         joined = "\n".join(_texts(authorization_statements(
             gateway_arn=GATEWAY_ARN, harness_roles=HARNESS_ROLES)))
-        for action in ("SanctionsFuzzy___sanctions_fuzzy", "PepList___pep_lookup",
-                       "AdverseMedia___adverse_media"):
+        for action in ("PepList___pep_lookup", "AdverseMedia___adverse_media"):
             assert f'action == AgentCore::Action::"{action}"' in joined
+
+    def test_screening_is_permitted_to_pre_screen_only(self):
+        """One screening tool, one agent allowed to call it. Compliance no longer screens
+        sanctions in Phase 2 — the full screen runs before the account opens."""
+        statements = authorization_statements(
+            gateway_arn=GATEWAY_ARN, harness_roles=HARNESS_ROLES)
+        screening = [s for s in statements if "SanctionsScreen___sanctions_screen" in s.cedar]
+        assert len(screening) == 1
+        assert "kyc90-harness-prescreen" in screening[0].cedar
 
     def test_no_permit_statements_raises(self):
         """A generator that silently produced zero permits would leave every agent unable to
         call any tool — indistinguishable from a working Gateway until the first live call."""
         with pytest.raises(ValueError):
             authorization_statements(
-                gateway_arn=GATEWAY_ARN, harness_roles={"router": HARNESS_ROLES["router"]})
+                gateway_arn=GATEWAY_ARN, harness_roles={"briefing": HARNESS_ROLES["briefing"]})
 
 
 class TestPromptInjectionStatements:
@@ -143,6 +157,13 @@ class TestPromptInjectionStatements:
         assert "context.input.name" in text
         assert "[context.input]" not in text
 
+    def test_is_scoped_to_exactly_the_actions_that_declare_the_field(self):
+        """Confirmed live: an unscoped `action` is rejected, because it covers the `CallTool`
+        parent, which declares no `input.name`."""
+        text = prompt_injection_statements(gateway_arn=GATEWAY_ARN)[0].cedar
+        assert SCREENING_SCOPE in text
+        assert "  action,\n" not in text
+
     def test_uses_a_guardrails_when_block_only(self):
         """F-16 — `when guardrails`, never a plain `when`, and never mixed with a `permit` in
         the same statement."""
@@ -157,18 +178,28 @@ class TestPromptInjectionStatements:
 
 
 class TestPiiSuppressionStatements:
+    #: An action that would declare an output schema. None does today, so the statement text is
+    #: tested against an explicit scope.
+    ACTIONS = ["DocumentStore___s3_get_document"]
+
+    def test_nothing_while_no_gateway_tool_declares_an_output_schema(self):
+        """The service rejects an output field the scoped actions do not declare, and no tool
+        declares one, so there is no statement to create and nothing it could scan."""
+        assert pii_suppression_statements(gateway_arn=GATEWAY_ARN) == []
+
     def test_covers_ssn_and_credit_card_by_default(self):
         """R15.2 — one statement per category."""
-        statements = pii_suppression_statements(gateway_arn=GATEWAY_ARN)
+        statements = pii_suppression_statements(gateway_arn=GATEWAY_ARN, actions=self.ACTIONS)
         assert len(statements) == 2
         joined = "\n".join(_texts(statements))
         assert 'BedrockGuardrails::SensitiveInformation(["US_SOCIAL_SECURITY_NUMBER"]' in joined
         assert 'BedrockGuardrails::SensitiveInformation(["CREDIT_DEBIT_CARD_NUMBER"]' in joined
+        assert 'action == AgentCore::Action::"DocumentStore___s3_get_document"' in joined
 
     def test_uses_suppress_output_not_forbid(self):
         """suppressOutput blocks the model's response after the fact; a `forbid` here would
         block the whole tool call rather than only the sensitive value in its result."""
-        for s in pii_suppression_statements(gateway_arn=GATEWAY_ARN):
+        for s in pii_suppression_statements(gateway_arn=GATEWAY_ARN, actions=self.ACTIONS):
             assert s.cedar.startswith("suppressOutput(")
             assert "forbid(" not in s.cedar
 
@@ -177,7 +208,7 @@ class TestPiiSuppressionStatements:
         indexing form the docs show for ContentFilter/PromptAttack — "per-category indexing is
         not supported for SensitiveInformation" — and requires an aggregation call
         (`.maxConfidenceScore()`) chained directly off the guardrail call instead."""
-        for s in pii_suppression_statements(gateway_arn=GATEWAY_ARN):
+        for s in pii_suppression_statements(gateway_arn=GATEWAY_ARN, actions=self.ACTIONS):
             assert ".maxConfidenceScore()" in s.cedar
             assert ".confidenceScore" not in s.cedar
 
@@ -195,14 +226,16 @@ class TestContentFilterStatements:
     def test_the_datapath_has_a_field_segment(self):
         for s in content_filter_statements(gateway_arn=GATEWAY_ARN):
             assert "context.input.name" in s.cedar
+            assert SCREENING_SCOPE in s.cedar
 
 
 class TestAllStatements:
     def test_combines_every_kind_for_one_gateway(self):
+        """No pii_suppression while no Gateway tool declares an output schema (see above)."""
         statements = all_statements(gateway_arn=GATEWAY_ARN, harness_roles=HARNESS_ROLES)
         kinds = {s.kind for s in statements}
-        assert kinds == {"authorization", "prompt_injection", "pii_suppression",
-                         "content_filter"}
+        assert kinds == {"authorization", "prompt_injection", "content_filter"}
+        assert len(statements) == 9
 
     def test_every_name_across_all_kinds_is_unique(self):
         """These become CloudFormation logical IDs within one jurisdiction's construct scope —

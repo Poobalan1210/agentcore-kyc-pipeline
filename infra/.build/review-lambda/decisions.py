@@ -19,6 +19,7 @@ Two things in this module are load-bearing and easy to get subtly wrong:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -29,8 +30,10 @@ from typing import Any, Mapping, Sequence
 AWAITING_REVIEW = "AWAITING_REVIEW"
 
 #: Phases a review decision can be scoped to. Property 10 — "a case is decided at most once per
-#: phase" — is meaningless without the phase, so it is required rather than defaulted.
-PHASES = ("phase1", "phase2")
+#: phase" — is meaningless without the phase, so it is required rather than defaulted. Phase 3 is
+#: a lifecycle re-assessment: one review per risk event, the previous one cleared by the state
+#: machine when it queues the next.
+PHASES = ("phase1", "phase2", "phase3")
 
 
 class ReviewAction(Enum):
@@ -52,6 +55,39 @@ TARGET_STATE: Mapping[ReviewAction, str] = MappingProxyType({
     ReviewAction.REJECT: "DECIDED",
     ReviewAction.REQUEST_STEP_UP: "AWAITING_APPLICANT",
 })
+
+#: Where the case lands, per phase. The state machine carries the decision out from here — opens
+#: the account, lifts to the enhanced posture, freezes — and it checks this state before doing
+#: so (`asl.py`), so the two must agree. Phase 1's table is `TARGET_STATE`.
+#:
+#: * Phase 2 APPROVE lifts to the enhanced posture and enrols monitoring; REJECT freezes; a
+#:   step-up tightens the restrictions while the applicant is asked for something that works.
+#: * Phase 3 has no step-up: a lifecycle review clears the alert or exits the relationship. Its
+#:   APPROVE target is the state the customer was in before the event (`day_zero_state`).
+TARGET_STATES: Mapping[str, Mapping[ReviewAction, str]] = MappingProxyType({
+    "phase1": TARGET_STATE,
+    "phase2": MappingProxyType({
+        ReviewAction.APPROVE: "MONITORING",
+        ReviewAction.REJECT: "FROZEN",
+        ReviewAction.REQUEST_STEP_UP: "RESTRICTED",
+    }),
+    "phase3": MappingProxyType({
+        ReviewAction.REJECT: "FROZEN",
+    }),
+})
+
+#: Phase 2 outcome -> the case state a Phase 3 clearance restores. Mirrors `_DAY0_POSTURE` in
+#: `infra/kyc/asl.py` (posture STANDARD/ENHANCED -> MONITORING, TIGHTENED -> RESTRICTED, anything
+#: else PROVISIONAL); `infra/tests/test_jsonata_expressions.py` asserts they agree.
+_DAY_ZERO_STATE_BY_PHASE2_OUTCOME: Mapping[str, str] = MappingProxyType({
+    "FULL_APPROVE_STANDARD": "MONITORING",
+    "FULL_APPROVE_ENHANCED_MONITORING": "MONITORING",
+    "RESTRICT_FURTHER": "RESTRICTED",
+})
+
+#: Screening classifications a reviewer's APPROVE resolves. Never CONFIRMED: a confirmed match is
+#: a prohibition, not an alert to be dispositioned (R4.3).
+CLEARABLE_CLASSIFICATIONS = ("PROBABLE", "POSSIBLE")
 
 #: Risk tier that no reviewer may approve past. R4.3 ("IF the preliminary tier is PROHIBITED THEN
 #: the system SHALL reject at Phase 1 and SHALL NOT open a provisional account") and Property 2
@@ -87,6 +123,7 @@ class InvalidReason(Enum):
     MISSING_TASK_TOKEN = "MISSING_TASK_TOKEN"
     NAIVE_TIMESTAMP = "NAIVE_TIMESTAMP"
     PROHIBITED_TIER_NOT_OVERRIDABLE = "PROHIBITED_TIER_NOT_OVERRIDABLE"
+    ACTION_NOT_AVAILABLE = "ACTION_NOT_AVAILABLE"
 
 
 #: HTTP status per resolution, for the reviewer console. 409 for the losing reviewer is the
@@ -138,6 +175,9 @@ class RecordedDecision:
     decided_at: str
     idempotency_key: str
     target_state: str
+    #: The PROBABLE / POSSIBLE screening alerts this APPROVE resolved, by listing id. Recorded with
+    #: the decision so the console and the audit record can say exactly what a reviewer cleared.
+    cleared_alerts: tuple[str, ...] = ()
 
     def to_item(self) -> dict[str, Any]:
         """DynamoDB attribute map. Keys are camelCase to match the §9.1 case record."""
@@ -150,6 +190,7 @@ class RecordedDecision:
             "decidedAt": self.decided_at,
             "idempotencyKey": self.idempotency_key,
             "targetState": self.target_state,
+            "clearedAlerts": list(self.cleared_alerts),
         }
 
 
@@ -163,6 +204,7 @@ def recorded_from_item(item: Mapping[str, Any]) -> RecordedDecision:
         decided_at=str(item.get("decidedAt", "")),
         idempotency_key=str(item.get("idempotencyKey", "")),
         target_state=str(item.get("targetState", "")),
+        cleared_alerts=tuple(str(a) for a in item.get("clearedAlerts") or ()),
     )
 
 
@@ -358,6 +400,24 @@ def validate_submission(
             detail.append(
                 "R4.3 and Property 2 forbid opening a provisional account on a PROHIBITED tier; "
                 "reject or request step-up instead")
+        elif submission.action is ReviewAction.APPROVE and confirmed_matches(case):
+            # The tier is absent when the rules never ran — a pipeline that degraded before the
+            # decision engine — so the recorded screening is checked directly as well. Without
+            # this, a confirmed match on a degraded case was one click from an open account.
+            reasons.append(InvalidReason.PROHIBITED_TIER_NOT_OVERRIDABLE)
+            detail.append(
+                "the recorded screening carries a CONFIRMED match "
+                f"({', '.join(confirmed_matches(case))}), which no reviewer may approve past "
+                "(R4.3)")
+        if (isinstance(submission.action, ReviewAction)
+                and submission.phase in TARGET_STATES
+                and submission.action not in TARGET_STATES[submission.phase]
+                and not (submission.phase == "phase3"
+                         and submission.action is ReviewAction.APPROVE)):
+            reasons.append(InvalidReason.ACTION_NOT_AVAILABLE)
+            detail.append(
+                f"{submission.action.value} is not available in {submission.phase}: a lifecycle "
+                "review clears the alert or exits the relationship")
 
     if not reasons:
         return None
@@ -401,11 +461,17 @@ def resolve(*, submission: ReviewSubmission, case: Mapping[str, Any] | None) -> 
 
     return ReviewOutcome(
         resolution=Resolution.ACCEPT, submission=submission,
-        decision=build_decision(submission))
+        decision=build_decision(submission, case))
 
 
-def build_decision(submission: ReviewSubmission) -> RecordedDecision:
-    """The record R6.3 requires: identity, UTC timestamp, decision, rationale."""
+def build_decision(submission: ReviewSubmission,
+                   case: Mapping[str, Any] | None = None) -> RecordedDecision:
+    """The record R6.3 requires: identity, UTC timestamp, decision, rationale.
+
+    An APPROVE also records the screening alerts it resolves, read from the case as it stood when
+    the reviewer decided.
+    """
+    approve = submission.action is ReviewAction.APPROVE
     return RecordedDecision(
         case_id=submission.case_id,
         phase=submission.phase,
@@ -414,8 +480,87 @@ def build_decision(submission: ReviewSubmission) -> RecordedDecision:
         rationale=submission.rationale,
         decided_at=to_utc_iso(submission.submitted_at),
         idempotency_key=submission.idempotency_key,
-        target_state=TARGET_STATE[submission.action],
+        target_state=target_state(submission.action, submission.phase, case),
+        cleared_alerts=clearable_alerts(case) if approve else (),
     )
+
+
+def target_state(action: ReviewAction, phase: str, case: Mapping[str, Any] | None) -> str:
+    """Where this action leaves the case in this phase. Phase 3's APPROVE restores day zero."""
+    if phase == "phase3" and action is ReviewAction.APPROVE:
+        return day_zero_state(case)
+    return TARGET_STATES.get(phase, TARGET_STATE)[action]
+
+
+def day_zero_state(case: Mapping[str, Any] | None) -> str:
+    """The case state before a lifecycle event: what Phase 2 decided, or still provisional."""
+    phase2 = (case or {}).get("phase2")
+    outcome = phase2.get("outcome") if isinstance(phase2, Mapping) else None
+    return _DAY_ZERO_STATE_BY_PHASE2_OUTCOME.get(str(outcome or ""), "PROVISIONAL")
+
+
+def _screening_fact(case: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """The recorded screening fact, as a Mapping, whichever way it was stored."""
+    raw = (case or {}).get("factScreening")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return {}
+    return raw if isinstance(raw, Mapping) else {}
+
+
+def _hits(case: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
+    return [h for h in _screening_fact(case).get("hits") or () if isinstance(h, Mapping)]
+
+
+def confirmed_matches(case: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Listing ids of every CONFIRMED alert on the recorded screening."""
+    return tuple(sorted({str(h.get("entryId")) for h in _hits(case)
+                         if str(h.get("classification") or "").upper() == "CONFIRMED"
+                         and h.get("entryId")}))
+
+
+def clearable_alerts(case: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Listing ids of the PROBABLE / POSSIBLE alerts an APPROVE resolves."""
+    return tuple(sorted({str(h.get("entryId")) for h in _hits(case)
+                         if str(h.get("classification") or "").upper()
+                         in CLEARABLE_CLASSIFICATIONS and h.get("entryId")}))
+
+
+def screening_dispositions(case: Mapping[str, Any] | None,
+                           decision: RecordedDecision) -> list[dict[str, Any]]:
+    """The case's dispositions with this decision's cleared alerts merged in, one per listing.
+
+    The rules read these (`decision-engine/facts.py`) and drop a PROBABLE or POSSIBLE alert whose
+    listing a reviewer has cleared, so the same customer is not sent round again for the same
+    alert in Phase 2 or after a list update. A CONFIRMED alert is never cleared, here or there.
+    """
+    existing: list[dict[str, Any]] = []
+    raw = (case or {}).get("screeningDispositions")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            raw = []
+    for item in raw or ():
+        if isinstance(item, Mapping) and item.get("entryId"):
+            existing.append(dict(item))
+    known = {d["entryId"] for d in existing}
+    fact = _screening_fact(case)
+    by_id = {str(h.get("entryId")): h for h in _hits(case)}
+    for entry_id in decision.cleared_alerts:
+        if entry_id in known:
+            continue
+        existing.append({
+            "entryId": entry_id,
+            "classification": str(by_id.get(entry_id, {}).get("classification") or ""),
+            "listVersion": fact.get("listVersion"),
+            "phase": decision.phase,
+            "reviewerId": decision.reviewer_id,
+            "decidedAt": decision.decided_at,
+        })
+    return existing
 
 
 def build_conditional_write(
@@ -424,8 +569,12 @@ def build_conditional_write(
     decision: RecordedDecision,
     table_name: str,
     keys: TableKeySchema = TableKeySchema(),
+    case: Mapping[str, Any] | None = None,
 ) -> ConditionalWrite:
     """One atomic conditional update. This expression *is* first-writer-wins (R6.5, R21.4).
+
+    `case` is the record the decision was resolved against; an APPROVE merges its cleared alerts
+    into the case's existing screening dispositions.
 
     Three clauses in the condition, each for a distinct failure:
 
@@ -467,14 +616,21 @@ def build_conditional_write(
             "reason": f"review {decision.action}",
         }],
     }
+    update = ("SET #reviewAttr = :decision, #state = :target, "
+              "#transitions = list_append(if_not_exists(#transitions, :empty), :transition)")
+    if decision.cleared_alerts:
+        # In the same write as the decision, so an alert is cleared exactly when the decision
+        # that cleared it lands. A JSON string, which is how the state machines read it.
+        names["#dispositions"] = "screeningDispositions"
+        values[":dispositions"] = json.dumps(screening_dispositions(case, decision),
+                                             sort_keys=True)
+        update += ", #dispositions = :dispositions"
     return ConditionalWrite(
         table_name=table_name,
         # Plain values: `ConditionalWrite.to_request` serializes to AttributeValues at the
         # boundary, so nothing in this module has to carry the wire format.
         key={keys.partition_key: submission.applicant_id, keys.sort_key: keys.case_sort_value},
-        update_expression=(
-            "SET #reviewAttr = :decision, #state = :target, "
-            "#transitions = list_append(if_not_exists(#transitions, :empty), :transition)"),
+        update_expression=update,
         condition_expression=(
             "attribute_exists(#phase) AND attribute_not_exists(#reviewAttr) "
             "AND #state = :awaiting"),
@@ -532,6 +688,7 @@ def resume_payload(outcome: ReviewOutcome) -> dict[str, Any]:
             "reviewerId": decision.reviewer_id,
             "decidedAt": decision.decided_at,
             "targetState": decision.target_state,
+            "clearedAlerts": list(decision.cleared_alerts),
             "replay": outcome.resolution is Resolution.REPLAY,
         }
     }

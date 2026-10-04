@@ -49,20 +49,31 @@ from aws_cdk import (
     aws_events_targets as targets,
     aws_iam as iam,
     aws_scheduler as scheduler,
+    aws_sqs as sqs,
     aws_stepfunctions as sfn,
 )
 from constructs import Construct
 
 from .asl import phase3_definition
-from .config import PROJECT
+from .config import LIST_OVERLAY_PARAMETER, PROJECT
 
 #: How long archived lifecycle events stay replayable. Long enough to re-drive a quarter after a
 #: logic fix, short enough that the archive is not a second copy of the customer base forever.
 ARCHIVE_RETENTION_DAYS = 120
 
-#: `detail-type` the rule matches. Narrow on purpose: a bus-wide rule would forward anything
+#: `detail-type`s the rule matches. Narrow on purpose: a bus-wide rule would forward anything
 #: published to this bus into a workflow that assumes a KYC customer id.
 RISK_EVENT_DETAIL_TYPE = "TransactionRiskEvent"
+
+#: A sanctions list update, fanned out as one event per open account (the demo's Act 3). The same
+#: event shape as a transaction risk event, so both reach the same re-assessment.
+LIST_UPDATE_DETAIL_TYPE = "SanctionsListUpdate"
+
+LIFECYCLE_DETAIL_TYPES = (RISK_EVENT_DETAIL_TYPE, LIST_UPDATE_DETAIL_TYPE)
+
+#: The agents Phase 3 invokes: Pre-Screen re-runs the screening tool, Briefing explains a case to
+#: the reviewer it is escalated to. Nothing else, so the grant is scoped to exactly these two.
+PHASE3_AGENTS = ("prescreen", "briefing")
 
 
 class LifecycleStack(Stack):
@@ -78,18 +89,25 @@ class LifecycleStack(Stack):
         audit_writer_arn: str,
         review_queue_url: str,
         review_queue_arn: str,
-        fraud_harness_arn: str,
-        fraud_model_id: str,
+        harness_arns: dict[str, str],
+        model_ids: dict[str, str],
+        account_function_arn: str,
+        audit_pins: dict[str, str],
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        missing = [a for a in PHASE3_AGENTS if a not in harness_arns or a not in model_ids]
+        if missing:
+            raise ValueError(f"Phase 3 needs harness ARNs and models for {missing}")
+        phase3_harnesses = {a: harness_arns[a] for a in PHASE3_AGENTS}
+
         # ------------------------------------------------------- decision history (append-only)
         #
-        # `customerId` + `sk` where sk is `DECISION#<iso>#<zero-padded version>`, so one query
-        # returns the whole history in decision order. That ordering is why the sort key is
-        # composed by the decision engine and unit-tested (`lifecycle.history_sort_key`) rather
-        # than assembled in a JSONata expression here.
+        # `customerId` + `sk`, where sk is `DECISION#<event time>#<event id>` for a re-assessment
+        # and `REVIEW#<event time>#<event id>` for the reviewer's decision on it. Both are derived
+        # from the event, so a replay collides with the original row and is refused; the decision
+        # key is composed by the engine and unit-tested (`lifecycle.history_sort_key`).
         self.history_table = dynamodb.Table(
             self, "DecisionHistory",
             table_name=f"{PROJECT}-decision-history",
@@ -115,9 +133,9 @@ class LifecycleStack(Stack):
             "LifecycleArchive",
             archive_name=f"{PROJECT}-lifecycle-archive",
             description=("Replayable history of lifecycle risk events. Replay is safe because the "
-                         "same eventId re-derives the same execution name and the same history "
-                         "sort key, so no duplicate decision can be written."),
-            event_pattern=events.EventPattern(detail_type=[RISK_EVENT_DETAIL_TYPE]),
+                         "same eventId re-derives the same history sort key, so no duplicate "
+                         "decision can be written."),
+            event_pattern=events.EventPattern(detail_type=list(LIFECYCLE_DETAIL_TYPES)),
             retention=Duration.days(ARCHIVE_RETENTION_DAYS),
         )
 
@@ -153,6 +171,20 @@ class LifecycleStack(Stack):
             actions=["lambda:InvokeFunction"],
             resources=[decision_engine_arn, audit_writer_arn],
         ))
+        # The account platform: freeze, restrict, and — only after a reviewer's clearance — lift.
+        sfn_role.add_to_policy(iam.PolicyStatement(
+            sid="MoveAccountRestrictions",
+            actions=["lambda:InvokeFunction"],
+            resources=[account_function_arn],
+        ))
+        # The screening list version in force, read before the rules re-assess, so a re-screen of
+        # the list from before the update is not mistaken for the control the update asked for.
+        sfn_role.add_to_policy(iam.PolicyStatement(
+            sid="ReadScreeningListVersion",
+            actions=["ssm:GetParameter"],
+            resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter"
+                       f"{LIST_OVERLAY_PARAMETER}"],
+        ))
         sfn_role.add_to_policy(iam.PolicyStatement(
             sid="EscalateToHumanReview",
             actions=["sqs:SendMessage"],
@@ -165,10 +197,10 @@ class LifecycleStack(Stack):
         # so a grant on the harness alone is a 403 at runtime. The first live execution failed
         # exactly here — synth cannot catch it because the template is valid either way.
         sfn_role.add_to_policy(iam.PolicyStatement(
-            sid="InvokeFraudHarness",
+            sid="InvokePhase3Harnesses",
             actions=["bedrock-agentcore:InvokeHarness",
                      "bedrock-agentcore:InvokeAgentRuntime"],
-            resources=[fraud_harness_arn, f"{fraud_harness_arn}/*"],
+            resources=[r for arn in phase3_harnesses.values() for r in (arn, f"{arn}/*")],
         ))
 
         self.phase3 = sfn.CfnStateMachine(
@@ -181,8 +213,10 @@ class LifecycleStack(Stack):
                 decision_engine_arn=decision_engine_arn,
                 audit_writer_arn=audit_writer_arn,
                 review_queue_url=review_queue_url,
-                fraud_harness_arn=fraud_harness_arn,
-                fraud_model_id=fraud_model_id,
+                harness_arns=phase3_harnesses,
+                model_ids={a: model_ids[a] for a in PHASE3_AGENTS},
+                account_function_arn=account_function_arn,
+                audit_pins=audit_pins,
             ),
             # STANDARD is load-bearing, not a default: exactly-once, up to a year, and the
             # idempotent StartExecution that makes replay safe.
@@ -198,20 +232,33 @@ class LifecycleStack(Stack):
         # workflow reads the engine-computed name and the append itself is guarded by
         # `attribute_not_exists(sk)`, so idempotency holds at the write even when a duplicate
         # execution starts.
+        # A failed delivery must not vanish. Without a DLQ an event that cannot start an execution
+        # is dropped after the retries, which for an AML control is the worst failure mode there
+        # is: no decision, no alert, no record. The code comment used to say this beside
+        # `dead_letter_queue=None`. SQS-managed encryption rather than the case key, because
+        # EventBridge would need a key-policy grant to write to a customer-managed-key queue and a
+        # DLQ that EventBridge cannot write to is the same as none.
+        self.event_dlq = sqs.Queue(
+            self, "LifecycleEventDlq",
+            queue_name=f"{PROJECT}-lifecycle-event-dlq",
+            encryption=sqs.QueueEncryption.SQS_MANAGED,
+            retention_period=Duration.days(14),
+            enforce_ssl=True,
+        )
+
         events.Rule(
             self, "RiskEventRule",
             rule_name=f"{PROJECT}-risk-event",
             event_bus=self.bus,
-            description="Route a transaction risk event to the Phase 3 lifecycle workflow.",
-            event_pattern=events.EventPattern(detail_type=[RISK_EVENT_DETAIL_TYPE]),
+            description=("Route a risk event or a sanctions list update to the Phase 3 lifecycle "
+                         "workflow."),
+            event_pattern=events.EventPattern(detail_type=list(LIFECYCLE_DETAIL_TYPES)),
             targets=[targets.SfnStateMachine(
                 sfn.StateMachine.from_state_machine_arn(
                     self, "Phase3Target", self.phase3.attr_arn),
-                # A failed delivery must not vanish. Without a DLQ an event that cannot start an
-                # execution is silently dropped, which for an AML control is the worst possible
-                # failure mode: no decision, no alert, no record.
-                dead_letter_queue=None,
+                dead_letter_queue=self.event_dlq,
                 retry_attempts=3,
+                max_event_age=Duration.hours(24),
             )],
         )
 
@@ -224,5 +271,6 @@ class LifecycleStack(Stack):
             self, "ReKycGroup", name=f"{PROJECT}-rekyc")
 
         cdk.CfnOutput(self, "LifecycleBusName", value=self.bus.event_bus_name)
+        cdk.CfnOutput(self, "LifecycleEventDlqUrl", value=self.event_dlq.queue_url)
         cdk.CfnOutput(self, "DecisionHistoryTable", value=self.history_table.table_name)
         cdk.CfnOutput(self, "Phase3StateMachineArn", value=self.phase3.attr_arn)

@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cedar import JURISDICTION_CODES, all_statements  # noqa: E402
 
-#: Every agent key that has at least one tool (design §5.1). Router and Notify are deliberately
+#: Every agent key that has at least one tool (design §5.1). Briefing and Notify are deliberately
 #: excluded — they have no tools and so need no authorisation policy.
 _TOOL_BEARING_AGENTS = (
     "documents", "identity", "fraud", "prescreen", "compliance")

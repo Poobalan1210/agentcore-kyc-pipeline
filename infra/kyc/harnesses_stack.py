@@ -39,9 +39,16 @@ from constructs import Construct
 
 from .config import AGENTS, JURISDICTIONS, PROJECT, REASONING_TRACE_RETENTION_DAYS
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "harnesses"))
-from prompts import OUTPUT_SCHEMAS, PROMPTS  # noqa: E402
+# Both, and tools first: `prompts` imports `tool_schemas` to follow the output-contract flag. Relying
+# on `gateways_stack` having inserted it already worked only when that module happened to be
+# imported first, which is true in app.py and false in a test that imports this module alone.
+for _dir in ("tools", "harnesses"):
+    _path = str(Path(__file__).resolve().parents[2] / _dir)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+from prompts import PROMPTS  # noqa: E402
 from tool_schemas import (  # noqa: E402
+    ALL_OUTPUT_CONTRACTS,
     OUTPUT_CONTRACTS,
     TARGET_NAMES,
     agent_tool_names,
@@ -91,35 +98,9 @@ HARNESS_MAX_LIFETIME_SECONDS = 900
 #: R11.15: reclaim an idle session rather than holding it open for the full lifetime.
 HARNESS_IDLE_SESSION_TIMEOUT_SECONDS = 120
 
-#: The Gateway namespace. AllowedTools pattern is ^(\*|@?[^/]+(/[^/]+)?)$ so "@kyc-gw/*" is
-#: valid. Listing it explicitly excludes shell and file_operations, which the default baseline
-#: would otherwise include (F-06).
-GATEWAY_TOOL_NAMESPACE = "@kyc-gw/*"
+#: The one built-in tool any agent is allowed. AllowedTools otherwise lists only the agent's own
+#: Gateway tools, never the `@kyc-gw/*` wildcard, which excludes shell and file_operations (F-06).
 CODE_INTERPRETER_TOOL = "@builtin/code_interpreter"
-
-
-def _pascal_output_schema(schema: dict) -> dict:
-    """The submit-tool contract, in the PascalCase shape CloudFormation wants (F-78)."""
-    def conv(node: dict) -> dict:
-        out: dict = {}
-        for k, v in node.items():
-            pk = {"type": "Type", "properties": "Properties", "required": "Required",
-                  "items": "Items", "description": "Description", "enum": "Enum",
-                  "minimum": "Minimum", "maximum": "Maximum",
-                  "maxLength": "MaxLength"}.get(k, k)
-            if k == "properties":
-                out[pk] = {kk: conv(vv) for kk, vv in v.items()}
-            elif k == "items":
-                out[pk] = conv(v) if isinstance(v, dict) else v
-            else:
-                out[pk] = v
-        return out
-
-    return {
-        "Name": schema["name"],
-        "Description": schema["description"],
-        "InputSchema": conv(schema["inputSchema"]),
-    }
 
 
 class HarnessesStack(Stack):
@@ -162,11 +143,18 @@ class HarnessesStack(Stack):
         #: drift from what actually ran.
         self.model_ids: dict[str, str] = {}
 
-        # Every agent is pinned to the US Gateway in this deployment. The four Gateways exist so
-        # jurisdiction is structural (F-04, D-01); which one an agent reaches is chosen by the
-        # router at run time via the Step Functions Task, not baked in here. Task 5.5's resource
-        # policies are what stop an agent reaching the wrong one.
+        #: Harness version each `live` endpoint is pinned to (TargetVersion), for the audit pins.
+        self.harness_versions: dict[str, str] = {}
+
+        # Every agent is attached to the US Gateway. This deployment is US-only: the four Gateways
+        # and their Cedar engines exist so jurisdiction stays structural (F-04, D-01), but UK, AU
+        # and JP are shown as the jurisdiction matrix rather than deployed (plan v2, "not before
+        # December"). An earlier comment here claimed a router chose the Gateway at run time; no
+        # such routing existed, and there is no router any more.
         default_gateway = gateway_arns["us"]
+        #: Exposed so the decision record pins the Gateway that actually served the tools, rather
+        #: than an ARN fabricated from the jurisdiction code at intake.
+        self.gateway_arn = default_gateway
 
         for agent in AGENTS:
             # F-76: HarnessName is ^[a-zA-Z][a-zA-Z0-9_]{0,39}$ — underscores, max 40 chars.
@@ -414,6 +402,9 @@ class HarnessesStack(Stack):
             self.harness_arns[agent.key] = harness.get_att("Arn").to_string()
             self.endpoint_arns[agent.key] = endpoint.get_att("Arn").to_string()
             self.model_ids[agent.key] = self._model_for(agent)
+            # The version the `live` endpoint serves, for the decision record's pins. Recording
+            # the endpoint name alone says "live", which is true of every version ever deployed.
+            self.harness_versions[agent.key] = harness.get_att("Version").to_string()
 
             cdk.CfnOutput(self, f"Harness{agent.role_suffix}Arn",
                           value=harness.get_att("Arn").to_string())
@@ -424,8 +415,8 @@ class HarnessesStack(Stack):
         # same schema the harness was built against, rather than a copy that drifts.
         cdk.CfnOutput(
             self, "OutputContractNames",
-            value=",".join(sorted(s["name"] for s in OUTPUT_SCHEMAS.values())),
-            description="submit_* tool names enforcing each agent's output contract (R11.13)")
+            value=",".join(sorted(ALL_OUTPUT_CONTRACTS.values())),
+            description="submit_* tool names built for each agent's output contract (R11.13)")
 
     @staticmethod
     def _model_for(agent) -> str:
@@ -438,16 +429,17 @@ class HarnessesStack(Stack):
         us = next(j for j in JURISDICTIONS if j.code == "us")
         if agent.reasoning_effort:
             return us.reasoning_model or us.workhorse_model
-        # F-90: the fast model cannot be trusted with a tool call. Router ran on Nova Micro and
+        # F-90: the fast model cannot be trusted with a tool call. The Router ran on Nova Micro and
         # failed every invocation with "Model produced invalid sequence as part of ToolUse", with a
         # correctly scoped single tool and a live target — while four agents on Nova Lite made tool
-        # calls successfully in the same runs. Since R11.13 requires structured output to travel as
-        # tool-use, and every agent now has an output contract, no agent can use the fast model.
+        # calls successfully in the same runs. So every agent that calls a tool runs on the
+        # workhorse model, including Pre-Screen: its tool call is the one that records the
+        # screening fact, and a missed call sends the case to a human.
         #
         # This is a real constraint on the cost story rather than a detail: the cheapest model is
-        # unusable for any agent that must report a finding, which is all of them.
-        if agent.key in OUTPUT_CONTRACTS:
+        # usable only for the agent that calls nothing and writes copy.
+        if agent.key in OUTPUT_CONTRACTS or agent.tools:
             return us.workhorse_model
-        if agent.key in ("router", "prescreen", "notify"):
+        if agent.key == "notify":
             return us.fast_model
         return us.workhorse_model

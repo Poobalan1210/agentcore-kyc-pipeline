@@ -26,11 +26,11 @@ def test_user_pool_exists_with_email_sign_in(template: Template) -> None:
     )
 
 
-def test_two_groups_exist_applicants_and_reviewers(template: Template) -> None:
-    """R32.2/R34.6 — the two roles the API authorizer scopes on."""
+def test_three_groups_exist_applicants_reviewers_and_presenters(template: Template) -> None:
+    """R32.2/R34.6 — the roles the handlers check, plus the demo's presenters."""
     groups = template.find_resources("AWS::Cognito::UserPoolGroup")
     names = {body["Properties"]["GroupName"] for body in groups.values()}
-    assert names == {"applicants", "reviewers"}
+    assert names == {"applicants", "reviewers", "presenters"}
 
 
 def test_user_pool_client_has_no_secret(template: Template) -> None:

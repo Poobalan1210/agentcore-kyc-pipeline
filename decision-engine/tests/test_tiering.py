@@ -73,8 +73,31 @@ class TestPreliminaryTier:
         assert d.rule
         assert set(d.inputs) == {
             "jurisdiction_risk", "pre_screen_matched", "document_confidence",
-            "velocity_critical", "velocity_detail", "product_applied",
+            "velocity_critical", "velocity_detail", "product_applied", "screening_hits",
         }
+
+    def test_a_confirmed_alert_prohibits(self):
+        d = preliminary_tier(prelim(screening_hits=(
+            ScreeningHit(list_id="SYN-0001", strength=MatchStrength.CONFIRMED),)))
+        assert d.tier is RiskTier.PROHIBITED
+        assert d.rule == "P1.screening_hit_confirmed"
+
+    @pytest.mark.parametrize("strength", [MatchStrength.PROBABLE, MatchStrength.POSSIBLE])
+    def test_an_unresolved_alert_goes_to_a_human_not_to_rejection(self, strength):
+        """The defect this rule replaces: any alert used to set pre_screen_matched, and a name
+        that merely resembled a listing was rejected as SCREENING_CONFIRMED_MATCH."""
+        d = preliminary_tier(prelim(screening_hits=(
+            ScreeningHit(list_id="SYN-0106", strength=strength),)))
+        assert d.tier is RiskTier.HIGH
+        assert d.rule == "P1.screening_hit_unresolved"
+        outcome = select_phase1_outcome(tier=d)
+        assert outcome.outcome is Phase1Outcome.MANUAL_REVIEW
+        assert outcome.reason_code != "SCREENING_CONFIRMED_MATCH"
+
+    def test_an_unresolved_alert_outranks_weak_documents(self):
+        d = preliminary_tier(prelim(document_confidence=0.1, screening_hits=(
+            ScreeningHit(list_id="SYN-0106", strength=MatchStrength.POSSIBLE),)))
+        assert d.rule == "P1.screening_hit_unresolved"
         assert d.thresholds["document_confidence_threshold"] == 0.8
         assert d.config_version
 
