@@ -401,6 +401,8 @@ export interface DecisionRecordPayload {
     engineOutcome?: string | null;
     reviewReason?: string | null;
     clearedAlerts?: string[];
+    /** The reviewer's rationale, sealed with a person's decision (D-42). */
+    rationale?: string | null;
   };
   versions?: Record<string, string>;
 }
@@ -442,6 +444,10 @@ export interface CaseTraceResponse {
   /** Each phase's latest execution, running or finished: the live view's timeline. Optional: an
    * API deployed before it was added omits it. */
   executions?: Partial<Record<"phase1" | "phase2" | "phase3", ExecutionTrace | null>>;
+  /** The mode this deployment attached its Cedar policy engines in: `LOG_ONLY` or `ENFORCE`
+   * (D-40). Null when the API was not told; absent from an API deployed before it was added.
+   * The decision record pins the mode each decision was made under (`versions`). */
+  policyEnforcement?: string | null;
 }
 
 // ----------------------------------------------------------------------------------- demo
@@ -544,6 +550,9 @@ export const api = {
     documents: Array<{ bucket: string; key: string; type: string; issuingCountry: string }>;
     applicationId: string;
     declaredIdentity: DeclaredIdentityPayload;
+    /** This browser's random id (D-41). The API stores only a keyed hash of it, for velocity;
+     * without one, velocity is not established for the case. */
+    deviceId?: string | null;
   }) =>
     request<CreateApplicantResponse>("/applicants", {
       method: "POST",
@@ -619,8 +628,13 @@ export const api = {
     }),
 
   resetDemo: () =>
-    request<{ faults: DemoFaults; listOverlay: DemoControls["listOverlay"]; note: string }>(
-      "/demo/reset",
-      { method: "POST" },
-    ),
+    request<{
+      faults: DemoFaults;
+      listOverlay: DemoControls["listOverlay"];
+      note: string;
+      /** Device and network count entries deleted (D-41). Null when none could be, or when the
+       * API has no velocity store; `velocityError` says which. Absent from an older API. */
+      velocityCleared?: number | null;
+      velocityError?: string;
+    }>("/demo/reset", { method: "POST" }),
 };

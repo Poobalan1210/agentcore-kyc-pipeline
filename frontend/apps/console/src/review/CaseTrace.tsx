@@ -6,6 +6,8 @@ import type {
   FactBase,
   ScreeningFact,
 } from "@shared/api/client";
+import { AgentReply, fieldLabel, formatValue, readReply, SAID_FIELDS } from "../process/agentReply";
+import { agentName } from "../process/agents";
 import { classificationTone, executionTone, guardReason, outcomeTone, phaseLabel } from "./labels";
 import "./CaseTrace.css";
 
@@ -110,8 +112,34 @@ function FactsTab({ trace }: { trace: CaseTraceResponse }) {
         fields={[["maxSeverity", "Highest severity"]]}
         extra={listCount(facts.adverseMedia, "attributed", "attributed article")}
       />
-      <FactCard title="Device and velocity" fact={facts.velocity} fields={[]} />
+      <FactCard
+        title="Device and network velocity"
+        fact={facts.velocity}
+        fields={[
+          ["deviceApplications", "People who applied from this device"],
+          ["ipApplications", "People who applied from this network"],
+          ["windowHours", "Window (hours)"],
+        ]}
+        extra={velocitySignals(facts.velocity)}
+      />
     </div>
+  );
+}
+
+/** D-41: which velocity signal the tool set, if any. Either critical one sends the case to a
+ * person; the counts are of different people, so one person applying again counts once. */
+function velocitySignals(fact: FactBase | null): React.ReactNode {
+  if (!fact || fact.performed === false) return null;
+  const signals = (fact.signals ?? {}) as Record<string, unknown>;
+  const set = [
+    signals.criticalDeviceReuse === true ? "critical reuse of this device" : null,
+    signals.criticalIpReuse === true ? "critical reuse of this network" : null,
+    signals.elevatedIpReuse === true ? "elevated reuse of this network" : null,
+  ].filter(Boolean);
+  return (
+    <p className={set.some((s) => s?.startsWith("critical")) ? "kyc-error-text" : "kyc-hint"}>
+      {set.length ? `Signals: ${set.join(", ")}.` : "No velocity signal."}
+    </p>
   );
 }
 
@@ -392,6 +420,9 @@ function DecisionsTab({ trace }: { trace: CaseTraceResponse }) {
             {sealed.decision?.clearedAlerts && sealed.decision.clearedAlerts.length > 0 ? (
               <FactRow label="Alerts cleared" value={sealed.decision.clearedAlerts.join(", ")} />
             ) : null}
+            {sealed.decision?.rationale ? (
+              <FactRow label="Reviewer's rationale, sealed" value={sealed.decision.rationale} />
+            ) : null}
             {sealed.supersedesDecisionId ? (
               <FactRow label="Supersedes" value={sealed.supersedesDecisionId} />
             ) : null}
@@ -413,30 +444,60 @@ function AgentsTab({ agents }: { agents: AgentNarrative[] }) {
   return (
     <div className="kyc-trace__section">
       <p className="kyc-hint">
-        What each agent said. Narrative only: the rules decided on the recorded facts, never on
-        this text, and a reply here can be wrong without changing any outcome.
+        What each agent, an AgentCore harness, said. Narrative only: the rules decided on the
+        recorded facts, never on this text, and a reply here can be wrong without changing any
+        outcome.
       </p>
-      {agents.map((run, i) => (
-        <details key={`${run.phase}-${run.agent}-${i}`} className="kyc-trace__agent">
-          <summary className="kyc-trace__agent-header">
-            <span>
-              {run.agent} · {phaseLabel(run.phase)}
-            </span>
-            <span className="kyc-trace__agent-meta">
-              <Badge tone={run.status === "OK" ? "success" : "danger"}>
-                {run.status ?? "—"}
-              </Badge>
-              {run.latencyMs ? ` ${(run.latencyMs / 1000).toFixed(1)}s` : ""}
-            </span>
-          </summary>
-          <pre className="kyc-trace__agent-body">
-            {run.narrative ??
-              `No reply${run.reason ? ` (${run.reason})` : ""}${
-                run.stopReason ? ` — stop reason ${run.stopReason}` : ""
-              }.`}
-          </pre>
-        </details>
-      ))}
+      {agents.map((run, i) => {
+        const reply = readReply(run.narrative);
+        return (
+          <details key={`${run.phase}-${run.agent}-${i}`} className="kyc-trace__agent">
+            <summary className="kyc-trace__agent-header">
+              <span>
+                {agentName(run.agent)} · {phaseLabel(run.phase)}
+              </span>
+              <span className="kyc-trace__agent-meta">
+                {/* Whether the harness answered, not whether the answer is right. */}
+                <Badge tone={run.status === "OK" ? "success" : "danger"}>
+                  {run.status === "OK" ? "Answered" : run.status === "DEGRADED" ? "No answer" : run.status ?? "—"}
+                </Badge>
+                {run.latencyMs ? ` ${(run.latencyMs / 1000).toFixed(1)}s` : ""}
+              </span>
+            </summary>
+            {reply && run.narrative ? (
+              <ReplyBody reply={reply} raw={run.narrative} />
+            ) : (
+              <pre className="kyc-trace__agent-body">
+                {`No reply${run.reason ? ` (${run.reason})` : ""}${
+                  run.stopReason ? ` — stop reason ${run.stopReason}` : ""
+                }.`}
+              </pre>
+            )}
+          </details>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A reply in fields: the agent's sentence, then its fields; the reply as written, on request. */
+function ReplyBody({ reply, raw }: { reply: AgentReply; raw: string }) {
+  if (!reply.fields) return <pre className="kyc-trace__agent-body">{reply.text}</pre>;
+  const fields = Object.entries(reply.fields).filter(([key]) => !SAID_FIELDS.includes(key));
+  return (
+    <div className="kyc-trace__agent-reply">
+      {reply.said ? <p className="kyc-trace__agent-said">“{reply.said}”</p> : null}
+      {fields.length ? (
+        <dl className="kyc-trace__facts">
+          {fields.map(([key, value]) => (
+            <FactRow key={key} label={fieldLabel(key)} value={formatValue(value)} />
+          ))}
+        </dl>
+      ) : null}
+      <details className="kyc-trace__details">
+        <summary>The reply, as the model wrote it</summary>
+        <pre className="kyc-trace__agent-body">{raw}</pre>
+      </details>
     </div>
   );
 }

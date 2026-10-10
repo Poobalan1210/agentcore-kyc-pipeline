@@ -232,12 +232,13 @@ class TestFreeze:
             assert result["allowed"] is False, kind
             assert result["reasonCode"] == "ACCOUNT_FROZEN"
 
-    def test_freezing_notifies_compliance_and_is_idempotent(self, platform):
+    def test_freezing_is_idempotent_and_claims_no_notification(self, platform):
         platform.freeze("A-1", outcome="FREEZE")
         platform.freeze("A-1", outcome="FREEZE")
         events = [e for e in platform.get_account("A-1")["recentEvents"]
                   if e["event"] == "FROZEN"]
-        assert len(events) == 1 and events[0]["complianceNotified"] is True
+        # The platform sends nothing, so its event log must not say compliance was notified.
+        assert len(events) == 1 and "complianceNotified" not in events[0]
 
 
 class TestTransactions:

@@ -92,6 +92,12 @@
 /* ------------------------------------------------------------------ a phase */
 
 .tl-card {
+  /* The three columns every lane shares: who did the work, the track, and its result. The result
+     is wide enough for what a tool recorded and the agent's whole sentence under it. */
+  --tl-label: 236px;
+  --tl-result: clamp(260px, 32%, 440px);
+  /* The "Recorded" and "Said" keys, so the two texts start in one column. */
+  --tl-key: 70px;
   container-type: inline-size;
   overflow: hidden;
   border: 1px solid var(--color-border);
@@ -231,6 +237,93 @@
   animation: tl-beacon 2.4s ease-out infinite;
 }
 
+/* ------------------------------------------------------------------ the legend */
+
+/* One line between Phase 1's header and its lanes: what an agent lane's marks mean, left to right
+   as a bar reads. Everything else about an agent is in its lane's drawer. */
+.tl-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: rgba(167, 139, 250, 0.045);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.tl-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.tl-legend__said b {
+  margin-right: 2px;
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-agent);
+}
+
+/* The Cedar mode, on "through AgentCore Gateway": the policy engine is attached to the Gateway. */
+.tl-policy {
+  margin-left: 2px;
+  padding: 1px 9px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  background: var(--color-neutral-bg);
+  color: var(--color-text-secondary);
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.tl-policy--log_only {
+  border-color: var(--color-warning-border);
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.tl-policy--enforce {
+  border-color: var(--color-success-border);
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.tl-key {
+  display: inline-block;
+  flex: none;
+}
+
+.tl-key--call,
+.tl-key--reply {
+  width: 22px;
+  height: 11px;
+  border: 1px solid rgba(167, 139, 250, 0.6);
+  border-radius: 3px;
+}
+
+.tl-key--call {
+  background: rgba(167, 139, 250, 0.72);
+}
+
+.tl-key--reply {
+  background: rgba(124, 92, 255, 0.16);
+}
+
+.tl-key--fact {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.25);
+}
+
 /* ------------------------------------------------------------------ the timeline grid */
 
 .tl {
@@ -240,7 +333,7 @@
 
 .tl-row {
   display: grid;
-  grid-template-columns: 196px minmax(0, 1fr) 236px;
+  grid-template-columns: var(--tl-label) minmax(0, 1fr) var(--tl-result);
   align-items: center;
   column-gap: 14px;
   min-height: 38px;
@@ -265,7 +358,12 @@
 }
 
 .tl-row__result {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
   min-width: 0;
+  padding: 4px 0;
 }
 
 .tl-row--axis {
@@ -304,15 +402,9 @@
 .tl-axis-flag {
   position: absolute;
   top: 22px;
-  padding-left: 7px;
+  padding: 0 7px;
   font: 700 11px var(--font-mono);
   white-space: nowrap;
-}
-
-.tl-axis-flag--end {
-  padding-left: 0;
-  padding-right: 7px;
-  transform: translateX(-100%);
 }
 
 .tl-axis-flag--decided {
@@ -369,8 +461,9 @@
 
 .tl__note {
   position: absolute;
-  left: 226px;
-  right: 266px;
+  /* Over the track: past the label column and its gap, short of the result column. */
+  left: calc(var(--tl-label) + 30px);
+  right: calc(var(--tl-result) + 30px);
   top: 50%;
   transform: translateY(-50%);
   padding: 10px 14px;
@@ -402,7 +495,7 @@
   background: none;
   color: var(--color-text);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 13.5px;
   font-weight: 650;
   text-align: left;
   cursor: pointer;
@@ -420,7 +513,7 @@
 
 .tl-lane__sub {
   overflow: hidden;
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--color-text-tertiary);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -428,6 +521,16 @@
 
 .tl-lane--empty .tl-lane__name {
   color: var(--color-text-secondary);
+}
+
+/* What the agent is: an AgentCore harness, in the agents' colour. */
+.tl-lane__harness {
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--color-agent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The four evidence agents run at once: one bracket down their labels. */
@@ -482,6 +585,16 @@
   color: #ede9fe;
 }
 
+/* Split where its tool's fact landed: calling its tool (strong), then writing its reply (faint).
+   The two keys in the legend are these two fills. */
+.tl-seg--agent.tl-seg--split {
+  background: linear-gradient(
+    90deg,
+    rgba(167, 139, 250, 0.72) 0 var(--split),
+    rgba(124, 92, 255, 0.16) var(--split) 100%
+  );
+}
+
 .tl-seg--rules {
   background: rgba(52, 211, 153, 0.32);
   border-color: rgba(52, 211, 153, 0.6);
@@ -526,6 +639,11 @@
   animation: tl-sweep 1.6s linear infinite;
 }
 
+/* A split bar's stops are measured on the bar itself, so it must not be stretched. */
+.tl-seg--split.tl-seg--running {
+  background-size: 100% 100%;
+}
+
 .tl-seg--failed {
   background: rgba(251, 113, 133, 0.32);
   border-color: rgba(251, 113, 133, 0.7);
@@ -539,15 +657,33 @@
   z-index: 2;
 }
 
-/* A tool recording its fact: the moment the rules could read it. */
+/* A tool recording its fact: the moment the rules could read it. Centred on the bar, and the
+   largest mark on the lane: its colour is what a room reads first. */
 .tl-mark--fact {
-  top: 13px;
-  width: 12px;
-  height: 12px;
-  margin-left: -6px;
+  top: 12px;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
   border-radius: 50%;
   background: var(--color-success);
   box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.25), 0 0 12px rgba(52, 211, 153, 0.65);
+}
+
+/* Coloured by what the tool recorded, as the result beside it is: a check that did not run is
+   never a green dot. */
+.tl-mark--fact.tl-mark--warn {
+  background: var(--color-warning);
+  box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.25), 0 0 12px rgba(251, 191, 36, 0.6);
+}
+
+.tl-mark--fact.tl-mark--fail {
+  background: var(--color-danger);
+  box-shadow: 0 0 0 3px rgba(251, 113, 133, 0.28), 0 0 12px rgba(251, 113, 133, 0.65);
+}
+
+.tl-mark--fact.tl-mark--skip {
+  background: var(--color-text-tertiary);
+  box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.22);
 }
 
 .tl-mark--flag {
@@ -583,7 +719,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12.5px;
+  font-size: 13.5px;
   line-height: 1.35;
 }
 
@@ -643,6 +779,56 @@
   color: var(--color-text-tertiary);
 }
 
+/* "Recorded" and "Said": what the tool wrote on the case, and what the agent said about it. */
+.tl-result__key,
+.tl-said__key {
+  flex: none;
+  width: var(--tl-key);
+  padding-top: 1px;
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.tl-said {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  /* Under the result's text, past its status dot. */
+  padding-left: 15px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+/* The agent's whole sentence, from its first word: an excerpt reads as cherry-picked. Four lines
+   hold the one or two sentences a prompt's `notes` gets; anything longer ends in an ellipsis,
+   and the drawer and the tooltip have it all. */
+.tl-said__text {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-agent);
+  font-style: italic;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+.tl-said--missing .tl-said__text {
+  color: var(--color-text-tertiary);
+  font-style: normal;
+}
+
+.tl-said__note {
+  /* In line with the Said text: the result's dot and gap, the key and its gap. */
+  padding-left: calc(var(--tl-key) + 23px);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--color-text-secondary);
+}
+
 .tl-result__action {
   flex: none;
   padding: 3px 10px;
@@ -663,7 +849,7 @@
 /* ------------------------------------------------------------------ a lane's detail */
 
 .tl-detail {
-  margin: 2px 16px 10px 226px;
+  margin: 2px 16px 10px calc(var(--tl-label) + 30px);
   padding: 10px 14px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -903,7 +1089,7 @@
 
   .tl-row__result {
     grid-column: 2;
-    padding-bottom: 6px;
+    padding: 0 0 6px;
   }
 
   .tl-row--axis .tl-row__result {

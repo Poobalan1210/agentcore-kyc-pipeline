@@ -676,6 +676,8 @@ def resume_payload(outcome: ReviewOutcome) -> dict[str, Any]:
 
     Deliberately thin: the state machine reads the case record for everything else, and duplicating
     agent results into the token payload would create a second, divergeable copy of the decision.
+    The rationale is not here either: it would land in execution history. The audit writer reads
+    it from the review this write stored (`<phase>Review`) and seals it with the decision (D-42).
     """
     decision = outcome.decision
     if decision is None:

@@ -19,6 +19,9 @@ Reasoning text is deliberately absent from the payload. It is retained (D-04) bu
 short-lived trace tier, because this record goes to a Compliance-mode bucket where nothing can
 be deleted for seven years — writing reasoning there would convert R18.9's deletion obligation
 into a permanent breach (R18.8).
+
+A reviewer's rationale is not model reasoning, and it is sealed here on purpose (D-42): R6.3 makes
+it part of the decision, and R18.8 keeps it in this record and out of logs and execution history.
 """
 
 from __future__ import annotations
@@ -155,6 +158,11 @@ class DecisionRecord:
     engine_outcome: str | None = None
     review_reason: str | None = None
     cleared_alerts: tuple[str, ...] = ()
+    # D-42 — why the reviewer decided as they did, in their words. Read from the review the
+    # handler recorded on the case (`<phase>Review`), never carried through the state machine, so
+    # it stays out of execution history. Sealed here because the case copy is mutable, and Phase
+    # 3's is removed when the next lifecycle review is queued.
+    rationale: str | None = None
     # A Phase 2 decision names the provisional decision it supersedes, so the two immutable
     # records of one application join without the mutable case record.
     supersedes_decision_id: str | None = None
@@ -187,6 +195,7 @@ def build_decision_record(
     sources: Sequence[EvidenceSource] | None = None,
     ingress_latency_ms: float | None = None,
     execution_name: str | None = None,
+    rationale: str | None = None,
 ) -> DecisionRecord | IncompleteRecord:
     """Assemble one decision record, or explain why it cannot be assembled.
 
@@ -279,6 +288,7 @@ def build_decision_record(
         review_reason=_opt_str(_either(outcome, "review_reason", "reviewReason")),
         cleared_alerts=tuple(str(a) for a in
                              _either(outcome, "cleared_alerts", "clearedAlerts") or ()),
+        rationale=(str(rationale).strip() or None) if rationale is not None else None,
         supersedes_decision_id=_opt_str(
             _either(outcome, "supersedes_decision_id", "supersedesDecisionId")),
     )
@@ -361,6 +371,7 @@ def to_payload(record: DecisionRecord) -> dict[str, Any]:
             "engineOutcome": record.engine_outcome,
             "reviewReason": record.review_reason,
             "clearedAlerts": list(record.cleared_alerts),
+            "rationale": record.rationale,
         },
         "executionName": record.execution_name,
         "supersedesDecisionId": record.supersedes_decision_id,

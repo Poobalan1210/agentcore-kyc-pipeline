@@ -1032,7 +1032,7 @@ def phase1_definition(
     # R38 — the guard that makes the expensive part of the graph unreachable without evidence. A
     # missing precondition is a process gap, not an applicant failure, so it steps up, never
     # rejects. After LIVENESS_FAILURE_LIMIT failures the checks run anyway and the rules route the
-    # case to a reviewer with an alternative verification path, with no lockout (R30.2, D-05).
+    # case to a reviewer instead of asking again, with no lockout (R30.2, D-05).
     decided = "[" + ", ".join(f"'{code}'" for code in DECIDED_JURISDICTIONS) + "]"
     s["CheckPreconditions"] = {
         "Type": "Choice",

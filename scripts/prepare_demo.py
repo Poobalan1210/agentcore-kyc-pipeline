@@ -12,7 +12,8 @@
 * `users` — creates the presenter and reviewer accounts if missing and puts each in its group.
   Group membership is granted only here, by hand, never by sign-up: a presenter can put any open
   account on hold.
-* `reset` — clears the fault flags and the published list update, as the Demo Panel's Reset does.
+* `reset` — clears the fault flags, the published list update and the device and network counts
+  the Fraud check reads (D-41), as the Demo Panel's Reset does.
 
 Every command that changes anything prints its plan and does nothing without `--apply`.
 
@@ -32,8 +33,12 @@ from typing import Any, Mapping
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "demo-assets"))
+# Appended, not prepended: api/ holds modules with plain names (`auth`, `demo`) that must not
+# shadow anything else on the path.
+sys.path.append(str(REPO / "api"))
 
 from gen_documents import DEMO_IDENTITIES  # noqa: E402
+import velocity  # noqa: E402  (api/velocity.py: the same clear the Demo Panel's Reset runs)
 
 #: KycPolicies is not here: stage 2 creates the Cedar policies with boto3
 #: (policies/deploy_stage2.py), so `check` reads them off the engines instead.
@@ -45,6 +50,7 @@ GROUPS = ("reviewers", "presenters")
 FAULTS_PARAMETER = "/kyc90/demo/faults"
 OVERLAY_PARAMETER = "/kyc90/screening/list-overlay"
 CASE_TABLE = "kyc90-cases"
+VELOCITY_TABLE = "kyc90-velocity"
 CASE_STATES = ("RECEIVED", "IN_PROGRESS", "AWAITING_APPLICANT", "AWAITING_REVIEW", "PROVISIONAL",
                "MONITORING", "RESTRICTED", "FROZEN", "DECIDED")
 
@@ -185,6 +191,15 @@ def check(session: Any, *, user_pool_id: str | None) -> int:
             value, is_clear = f"unreadable ({type(exc).__name__})", False
         problems += 0 if is_clear else 1
         print(f"  {'ok ' if is_clear else 'SET'} {name} = {value}")
+    # Information, not a problem: one person applying again counts once, so the run of show's
+    # four personas never reach the five-people signal. Other identities applied from the same
+    # browser since the last reset do count.
+    try:
+        entries = velocity.count(session, table=VELOCITY_TABLE)
+        print(f"  --- {VELOCITY_TABLE}: {entries} device and network count entries "
+              "(reset clears them)")
+    except Exception as exc:  # noqa: BLE001 - unreadable is the finding
+        print(f"  --- {VELOCITY_TABLE}: unreadable ({type(exc).__name__})")
 
     if user_pool_id:
         idp = session.client("cognito-idp")
@@ -247,13 +262,17 @@ def reset(session: Any, *, apply: bool) -> int:
     for name, value in plan:
         print(f"  {'' if apply else 'would '}set {name} = {json.dumps(value)}")
     if not apply:
-        print("\nDry run. Re-run with --apply. Frozen accounts stay frozen either way: only a "
-              "reviewer unfreezes.")
+        entries = velocity.count(session, table=VELOCITY_TABLE)
+        print(f"  would delete {entries} device and network count entries from {VELOCITY_TABLE}")
+        print("\nDry run. Re-run with --apply. Frozen accounts stay frozen either way: nothing "
+              "in this build unfreezes one.")
         return 0
     ssm = session.client("ssm")
     for name, value in plan:
         ssm.put_parameter(Name=name, Value=json.dumps(value, sort_keys=True), Type="String",
                           Overwrite=True)
+    deleted = velocity.clear(session, table=VELOCITY_TABLE)
+    print(f"  deleted {deleted} device and network count entries from {VELOCITY_TABLE}")
     return 0
 
 

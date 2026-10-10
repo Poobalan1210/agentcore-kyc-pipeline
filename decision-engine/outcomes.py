@@ -20,10 +20,12 @@ the person."
 
 Resolved as `REJECT` with reason code `SCREENING_CONFIRMED_MATCH` and `notify_compliance=True`,
 because the requirements are normative and the design note is about framing. Both are honoured:
-the outcome satisfies R4.3, and the reason code plus compliance notification carry the design's
-point that this is a legal prohibition on onboarding rather than a judgement about the person.
-The distinction is not cosmetic — it decides whether the applicant sees "you were rejected" or
-"we cannot proceed and a compliance officer has been notified", and only the second is true.
+the outcome satisfies R4.3, and the reason code plus the compliance flag carry the design's point
+that this is a legal prohibition on onboarding rather than a judgement about the person.
+
+The flag is a flag. It is recorded on the decision and in the sealed record, and nothing in this
+build sends a notification or opens a referral on it, so the explanation says the decision is
+flagged for compliance, never that someone has been notified (D-42).
 """
 
 from __future__ import annotations
@@ -78,7 +80,8 @@ def select_phase1_outcome(
             reason_code="SCREENING_CONFIRMED_MATCH",
             explanation=(
                 "A confirmed screening match prohibits onboarding. This is a legal restriction, "
-                "not an assessment of the applicant, and a compliance officer has been notified."
+                "not an assessment of the applicant. The decision is flagged for compliance "
+                "(notifyCompliance); this build sends no notification or referral itself."
             ),
             notify_compliance=True,
             tier=tier,
@@ -168,7 +171,9 @@ def select_phase2_outcome(
             rule="O2.full_tier_prohibited",
             reason_code="SCREENING_CONFIRMED_MATCH",
             explanation=(
-                "A confirmed screening match prohibits onboarding. Compliance has been notified."
+                "A confirmed screening match prohibits onboarding, so the account is frozen. The "
+                "decision is flagged for compliance (notifyCompliance); this build sends no "
+                "notification or referral itself."
             ),
             notify_compliance=True,
             tier=tier, edge_cases=matched, recorded_signals=signals,

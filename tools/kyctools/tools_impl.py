@@ -431,10 +431,16 @@ def velocity_check(args: dict[str, Any], ctx: dict[str, Any]) -> ToolResult:
     Returns signals, never a verdict. Whether a signal is disqualifying is a decision-engine
     question (§8.4).
 
-    This build does not capture device or IP identifiers at intake (plan v2 defers it: only the
-    mule-pattern variant of the risk-event act needs them). When the case carries none, the tool
-    records `performed: false, status: NOT_ESTABLISHED` rather than zero counts — "we did not look"
-    and "we looked and saw nothing" are different facts, and only the first is true here.
+    Intake (`api/velocity.py`, D-41) stores keyed hashes of the browser's device id and of the
+    caller's network on the case, and writes one row per person under each into the velocity
+    store, keyed by a hash of the declared identity. So `deviceApplications` and `ipApplications`
+    count the different people who applied from this device and this network in the window,
+    this application included, and one person applying again counts once.
+
+    When the case carries no identifiers (capture failed, or a case written by something other
+    than intake), the tool records `performed: false, status: NOT_ESTABLISHED` rather than zero
+    counts — "we did not look" and "we looked and saw nothing" are different facts, and only the
+    first is true then.
     """
     tool = "velocity_check"
     attribute = FACT_ATTRIBUTES["velocity"]

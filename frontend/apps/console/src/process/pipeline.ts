@@ -185,6 +185,16 @@ function notPerformed(fact: FactBase | null): string {
   return `Not performed: ${why}`;
 }
 
+/**
+ * The same in a few words, with the status exactly as the tool recorded it. UNAVAILABLE covers a
+ * source that could not be reached and an input the case lacks (`tools_impl.py`), so the screen
+ * repeats the status rather than guessing which; the reason is in the detail.
+ */
+function notPerformedShort(fact: FactBase | null): string {
+  const status = str(fact?.status);
+  return status && status !== "OK" ? `Not performed · ${status}` : "Not performed";
+}
+
 function lastTransition(
   transitions: CaseTransition[],
   pick: (t: CaseTransition) => boolean,
@@ -611,7 +621,7 @@ export function buildProcess(input: ProcessInput): ProcessView {
       id: "doc-read",
       title: "Document read",
       name: "Documents",
-      by: "Documents agent → s3_get_document → Amazon Textract + MRZ check digits",
+      by: "Documents agent (AgentCore harness) → AgentCore Gateway → s3_get_document → Amazon Textract + MRZ check digits",
       via: "Amazon Textract · MRZ check digits",
       icon: "document" as IconName,
       kind: "agent" as const,
@@ -635,7 +645,7 @@ export function buildProcess(input: ProcessInput): ProcessView {
         status: "fail",
         summary: reason ?? notPerformed(docFact),
         short: !performed(docFact)
-          ? "Not performed"
+          ? notPerformedShort(docFact)
           : reason && /pdf/i.test(reason)
             ? "Unreadable · a PDF, not a photo"
             : "Document unreadable",
@@ -670,7 +680,7 @@ export function buildProcess(input: ProcessInput): ProcessView {
       id: "face-match",
       title: "Face match",
       name: "Identity",
-      by: "Identity agent → rekognition_compare_faces → Amazon Rekognition",
+      by: "Identity agent (AgentCore harness) → AgentCore Gateway → rekognition_compare_faces → Amazon Rekognition",
       via: "Amazon Rekognition · CompareFaces",
       icon: "face" as IconName,
       kind: "agent" as const,
@@ -688,7 +698,7 @@ export function buildProcess(input: ProcessInput): ProcessView {
       } as Stage;
     }
     if (!performed(faceFact)) {
-      return { ...base, status: "fail", summary: notPerformed(faceFact), short: "Not performed" } as Stage;
+      return { ...base, status: "fail", summary: notPerformed(faceFact), short: notPerformedShort(faceFact) } as Stage;
     }
     const band = str(faceFact.similarityBand);
     if (faceFact.match === true) {
@@ -715,7 +725,7 @@ export function buildProcess(input: ProcessInput): ProcessView {
       id: "fraud",
       title: "Fraud signals",
       name: "Fraud",
-      by: "Fraud agent → velocity_check → Amazon DynamoDB",
+      by: "Fraud agent (AgentCore harness) → AgentCore Gateway → velocity_check → Amazon DynamoDB",
       via: "Velocity check · Amazon DynamoDB",
       icon: "eye" as IconName,
       kind: "agent" as const,
@@ -736,19 +746,31 @@ export function buildProcess(input: ProcessInput): ProcessView {
       return {
         ...base,
         status: "skip",
-        summary: "Not established: no device or IP is captured at intake in this build",
-        short: "Not established · no device ID at intake",
+        summary: "Not established: no device or network was captured with this application",
+        short: "Not established · nothing captured at intake",
       } as Stage;
     }
     if (!performed(velocityFact)) {
-      return { ...base, status: "fail", summary: notPerformed(velocityFact), short: "Not performed" } as Stage;
+      return { ...base, status: "fail", summary: notPerformed(velocityFact), short: notPerformedShort(velocityFact) } as Stage;
     }
-    const critical = velocityFact.velocityCritical === true;
+    // D-41: the tool counts the different people who applied from this device and this network
+    // in its window, this application included, and sets a signal when either count is critical.
+    const signals = (velocityFact.signals ?? {}) as Record<string, unknown>;
+    const deviceCritical = signals.criticalDeviceReuse === true;
+    const critical = deviceCritical || signals.criticalIpReuse === true;
+    const fromDevice = people(velocityFact.deviceApplications);
+    const fromNetwork = people(velocityFact.ipApplications);
+    const hours = Number(velocityFact.windowHours) || 24;
+    const counted = `${fromDevice} from this device and ${fromNetwork} from this network in ${hours} h`;
     return {
       ...base,
       status: critical ? "warn" : "done",
-      summary: critical ? "Velocity is critical" : "Velocity within normal limits",
-      short: critical ? "Velocity critical" : "Velocity normal",
+      summary: critical
+        ? `Velocity critical: ${counted}, so the rules send the case to a person`
+        : `Within limits: ${counted}`,
+      short: critical
+        ? `Velocity critical · ${deviceCritical ? `${fromDevice} from this device` : `${fromNetwork} from this network`}`
+        : `Within limits · ${fromDevice} from this device in ${hours} h`,
     } as Stage;
   })();
 
@@ -758,7 +780,7 @@ export function buildProcess(input: ProcessInput): ProcessView {
       id: "screening",
       title: "Sanctions screening",
       name: "Pre-Screen",
-      by: "Pre-Screen agent → sanctions_screen → synthetic consolidated list",
+      by: "Pre-Screen agent (AgentCore harness) → AgentCore Gateway → sanctions_screen → synthetic consolidated list",
       via: "Sanctions list · exact and variant names",
       icon: "globe" as IconName,
       kind: "agent" as const,
@@ -776,7 +798,7 @@ export function buildProcess(input: ProcessInput): ProcessView {
       } as Stage;
     }
     if (!performed(screeningFact)) {
-      return { ...base, status: "fail", summary: notPerformed(screeningFact), short: "Not performed" } as Stage;
+      return { ...base, status: "fail", summary: notPerformed(screeningFact), short: notPerformedShort(screeningFact) } as Stage;
     }
     const hits = screeningFact.hits ?? [];
     const excluded = screeningFact.excluded ?? [];
@@ -938,13 +960,13 @@ export function buildProcess(input: ProcessInput): ProcessView {
     id: "pep",
     title: "Politically exposed persons",
     name: "PEP check",
-    by: "Compliance agent → pep_lookup",
+    by: "Compliance agent (AgentCore harness) → AgentCore Gateway → pep_lookup",
     via: "Compliance agent · pep_lookup",
     icon: "person" as IconName,
   };
   const pepStage: Stage = pepFact
     ? !performed(pepFact)
-      ? { ...pepBase, status: "fail", summary: notPerformed(pepFact), short: "Not performed" }
+      ? { ...pepBase, status: "fail", summary: notPerformed(pepFact), short: notPerformedShort(pepFact) }
       : {
           ...pepBase,
           status: str(pepFact.pepStatus) === "NONE" ? "done" : "warn",
@@ -965,13 +987,13 @@ export function buildProcess(input: ProcessInput): ProcessView {
     id: "media",
     title: "Adverse media",
     name: "Adverse media",
-    by: "Compliance agent → adverse_media",
+    by: "Compliance agent (AgentCore harness) → AgentCore Gateway → adverse_media",
     via: "Compliance agent · adverse_media",
     icon: "document" as IconName,
   };
   const mediaStage: Stage = mediaFact
     ? !performed(mediaFact)
-      ? { ...mediaBase, status: "fail", summary: notPerformed(mediaFact), short: "Not performed" }
+      ? { ...mediaBase, status: "fail", summary: notPerformed(mediaFact), short: notPerformedShort(mediaFact) }
       : {
           ...mediaBase,
           status: !severity || severity === "NONE" || severity === "LOW" ? "done" : "warn",
@@ -1036,7 +1058,7 @@ export function buildProcess(input: ProcessInput): ProcessView {
     id: "notify",
     title: "Customer told",
     name: "Customer told",
-    by: "Notify agent → tipping-off guard",
+    by: "Notify agent (AgentCore harness, no tools) → tipping-off guard",
     via: "Notify agent · tipping-off guard",
     icon: "bell",
     status: notes.length ? "done" : notifyFailed ? "warn" : "idle",
@@ -1076,7 +1098,7 @@ export function buildProcess(input: ProcessInput): ProcessView {
     id: "monitor",
     title: "Re-screened after a list update",
     name: "Re-screen on every list update",
-    by: "EventBridge → Phase 3 state machine → Pre-Screen agent",
+    by: "EventBridge → Phase 3 state machine → Pre-Screen agent (AgentCore harness) → AgentCore Gateway → sanctions_screen",
     via: "EventBridge · Phase 3 · Pre-Screen agent",
     icon: "eye",
     steady: watching,
@@ -1118,7 +1140,7 @@ export function buildProcess(input: ProcessInput): ProcessView {
     {
       id: "phase1",
       title: "Phase 1 · Open the account",
-      subtitle: `Four agents gather evidence in parallel; the rules decide. Target ${TARGET_SECONDS} s.`,
+      subtitle: `Four agents, each an AgentCore harness, gather evidence in parallel; the rules decide. Target ${TARGET_SECONDS} s.`,
       status: !caseExists ? "idle" : phaseGroupStatus(phase1Decision, phase1Stages, phase1Running),
       label: awaitingReview1 ? "With a reviewer" : undefined,
       stages: phase1Stages,
@@ -1244,6 +1266,13 @@ export function buildProcess(input: ProcessInput): ProcessView {
   return { headline, groups, events, backstage };
 }
 
+/** A velocity count as words: "1 person", "3 people". */
+function people(value: unknown): string {
+  const n = value === null || value === undefined || value === "" ? NaN : Number(value);
+  if (!Number.isFinite(n)) return "an unknown number of people";
+  return n === 1 ? "1 person" : `${n} people`;
+}
+
 function sentence(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
@@ -1331,7 +1360,7 @@ function describe(s: StoryInput): { outcome: string; detail: string | null } {
     case "IN_PROGRESS":
       return {
         outcome: "Four agents are gathering the evidence",
-        detail: "In parallel, every tool call through AgentCore Gateway. Each tool records a fact; the rules decide on the facts.",
+        detail: "In parallel, each through AgentCore Gateway to its evidence tool. Each tool records a fact; the rules decide on the facts.",
       };
     case "AWAITING_APPLICANT":
       return {

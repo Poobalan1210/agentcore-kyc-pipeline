@@ -85,9 +85,11 @@
   color: transparent;
 }
 
+/* What it is built on. Shown at every width: the one line of the bar that is always on screen. */
 .brand__sub {
-  font-size: 11.5px;
-  color: var(--color-text-tertiary);
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--color-text-secondary);
   white-space: nowrap;
 }
 
@@ -157,6 +159,61 @@
   align-items: center;
   gap: var(--space-3);
   flex: none;
+}
+
+.text-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 140ms ease, border-color 140ms ease, background-color 140ms ease;
+}
+
+.text-toggle:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-tertiary);
+}
+
+.text-toggle:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 2px;
+}
+
+.text-toggle--on {
+  border-color: var(--color-accent);
+  background: var(--color-accent-subtle);
+  color: var(--color-text);
+}
+
+/*
+ * Large text (D-40): the process side of the live demo, the review console and a case's page grow
+ * by about a third. Zoom, not font sizes, so every lane, bar and column keeps its proportions; the
+ * phone and the bar keep their size.
+ */
+.console--large .live-stage__process,
+.console--large .kyc-review-layout,
+.console--large .case-detail__grid {
+  zoom: 1.35;
+}
+
+/* Zoomed, a lane's result column takes a larger share, so the agent's sentence keeps its lines. */
+.console--large .tl-card {
+  --tl-result: clamp(260px, 36%, 440px);
+}
+
+/* Beside the phone, its steps are on the phone itself: the room gets the lanes instead. */
+.console--large .live-stage__process .tl-phone {
+  display: none;
 }
 
 .env-chip {
@@ -347,10 +404,16 @@
   margin-bottom: var(--space-3);
 }
 
+/* Narrower windows, browser zoom included, give up the account's name and the toggle's label; the
+   line saying what this is built on stays. */
 @media (max-width: 1360px) {
-  .brand__sub,
-  .user-chip__text {
+  .user-chip__text,
+  .text-toggle__label {
     display: none;
+  }
+
+  .text-toggle {
+    padding: 0 9px;
   }
 }
 

@@ -319,6 +319,11 @@ LIVENESS_LIGHT_CHALLENGE = "FaceMovementAndLightChallenge"
 LIVENESS_MOVEMENT_CHALLENGE = "FaceMovementChallenge"
 LIVENESS_CHALLENGES = (LIVENESS_LIGHT_CHALLENGE, LIVENESS_MOVEMENT_CHALLENGE)
 
+#: The two modes a Gateway attaches its Cedar policy engine in (`-c policyEnforcement`). A closed
+#: set, shared by the Gateways that are attached in it and the API that reports it to the
+#: console's live view (D-40).
+POLICY_ENFORCEMENT_MODES = ("LOG_ONLY", "ENFORCE")
+
 # F-11: 5,000 active sessions in us-east-1 and us-west-2, 2,500 elsewhere. The approval path runs
 # four agents per applicant, so divide before quoting a concurrency number — and R20.7 requires it
 # measured, not calculated.

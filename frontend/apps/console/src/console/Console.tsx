@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useState } from "react";
+import { ReactNode, useCallback, useEffect, useState } from "react";
 import { api } from "@shared/api/client";
 import { LiveDemo } from "../live/LiveDemo";
 import { ReviewConsole } from "../review/ReviewConsole";
@@ -68,6 +68,7 @@ export function Console() {
   const session = useSession();
   const route = useRoute();
   const queueDepth = useQueueDepth(session.isReviewer);
+  const [largeText, setLargeText] = useLargeText();
   const current = VIEWS.find((v) => v.view === route.view) ?? VIEWS[0];
 
   const allowed = (info: ViewInfo) =>
@@ -80,7 +81,7 @@ export function Console() {
   ].filter(Boolean);
 
   return (
-    <div className="console">
+    <div className={`console${largeText ? " console--large" : ""}`}>
       <header className="topbar">
         <a href={hrefFor("live")} className="brand" aria-label="KYC in 90 seconds: live demo">
           <span className="brand__mark" aria-hidden="true">
@@ -123,6 +124,16 @@ export function Console() {
         </nav>
 
         <div className="topbar__end">
+          <button
+            type="button"
+            className={`text-toggle${largeText ? " text-toggle--on" : ""}`}
+            aria-pressed={largeText}
+            onClick={() => setLargeText(!largeText)}
+            title="Larger text for the room: the process view and the review console grow, the phone keeps its size"
+          >
+            <Icon name="text" size={16} />
+            <span className="text-toggle__label">Large text</span>
+          </button>
           <span className="env-chip" title="The Region of the API this console calls">
             <span className="env-chip__dot" aria-hidden="true" />
             Live AWS · <strong>{apiRegion() ?? "region unknown"}</strong>
@@ -202,6 +213,33 @@ function Gated({ info, allowed, children }: { info: ViewInfo; allowed: boolean; 
       </p>
     </div>
   );
+}
+
+const LARGE_TEXT_KEY = "kyc90.console.largeText";
+
+/**
+ * Larger text for a room (D-40): the process side and the review console grow; the phone keeps
+ * its size, so it still fits beside them. Browser zoom is not the same thing: it narrows the
+ * window, which hides the AgentCore line in the bar and squeezes the timeline. Kept across
+ * reloads, like the Story or Backstage choice.
+ */
+function useLargeText(): [boolean, (on: boolean) => void] {
+  const [on, setOn] = useState(() => {
+    try {
+      return window.localStorage.getItem(LARGE_TEXT_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const choose = useCallback((next: boolean) => {
+    setOn(next);
+    try {
+      window.localStorage.setItem(LARGE_TEXT_KEY, next ? "1" : "0");
+    } catch {
+      // Storage disabled: the choice lasts until the page reloads.
+    }
+  }, []);
+  return [on, choose];
 }
 
 /** How many cases wait for a reviewer, for the badge in the bar. Reviewers only. */

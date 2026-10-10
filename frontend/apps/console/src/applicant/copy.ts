@@ -134,7 +134,13 @@ export const REVIEW_COPY = {
   address: "Home address",
   idDocument: "ID document",
   selfie: "Selfie video",
-  selfieDone: "Live check complete",
+  selfieDone: "Live person confirmed",
+  // A failed check is said as failed. Submitting stays possible (no lockout, R30.2), but the
+  // check is offered again first, since a failed one is what the bank would ask for next.
+  selfieFailed: "We couldn't confirm a live person",
+  selfieFailedHint: "Redo it before you submit, facing the camera in good light.",
+  // An application reopened after a reload: the check is on the case, its result not in hand.
+  selfieOnFile: "Selfie video on file",
   account: "Account",
   edit: "Edit",
   retake: "Retake",

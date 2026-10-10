@@ -10,6 +10,7 @@ import { ReviewStep } from "./ReviewStep";
 import { StatusStep } from "./StatusStep";
 import { StepUpActions } from "./ResultStep";
 import { ERROR_COPY, PROGRESS_COPY } from "./copy";
+import { deviceId } from "./device";
 import { DeclaredIdentity, DocumentDraft, FlowStep, IntakeSelection } from "./types";
 import "./app.css";
 
@@ -93,6 +94,9 @@ export function KycFlow({
   const [documents, setDocuments] = useState<DocumentDraft[] | null>(null);
   /** This attempt has a face check on record: done here, or already on the submitted case. */
   const [livenessDone, setLivenessDone] = useState(Boolean(resume));
+  /** What that face check found, when it was done here: the review shows a failed one as
+   * failed. Null for a check already on the case when the application was reopened. */
+  const [livenessLive, setLivenessLive] = useState<boolean | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [prefilled] = useState(prefill);
@@ -116,6 +120,7 @@ export function KycFlow({
         productApplied: selection.productApplied,
         applicationId,
         declaredIdentity,
+        deviceId: deviceId(),
         documents: docs.map((d) => ({
           bucket: d.uploadedBucket ?? "",
           key: d.uploadedKey ?? "",
@@ -149,6 +154,7 @@ export function KycFlow({
       // The document is still in hand unless the page was reloaded; then it is asked for again.
       onRedoLiveness: () => {
         setLivenessDone(false);
+        setLivenessLive(null);
         setStep("liveness");
       },
       onNewDocument: () => {
@@ -210,11 +216,13 @@ export function KycFlow({
         jurisdiction={selection.jurisdiction}
         applicationId={applicationId}
         active={active}
-        onComplete={() => {
+        onComplete={(isLive) => {
           // The app moves forward whatever the result: a failed check does not block the
-          // application. R30.2 (three failures route to a person with an alternative path, never
-          // a lockout) is enforced server-side, where the failures are counted.
+          // application, and the review says it failed and offers it again. R30.2 (three
+          // failures route to a person, never a lockout) is enforced server-side, where the
+          // failures are counted.
           setLivenessDone(true);
+          setLivenessLive(isLive);
           setStep(documents ? "review" : "documents");
         }}
         // Before submission, back to the document; after a step-up, back to the application.
@@ -230,10 +238,12 @@ export function KycFlow({
         identity={declaredIdentity}
         selection={selection}
         documents={documents}
+        liveness={livenessLive}
         onEditDetails={() => setStep("details")}
         onRetakeDocument={() => setStep("documents")}
         onRedoSelfie={() => {
           setLivenessDone(false);
+          setLivenessLive(null);
           setStep("liveness");
         }}
         onSubmit={() => handleSubmit(documents)}

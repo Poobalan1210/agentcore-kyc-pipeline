@@ -74,8 +74,8 @@ export function ProcessView({
         </>
       )}
       <p className="process__foot">
-        Every tool call goes through Amazon Bedrock AgentCore Gateway, where Cedar policy evaluates
-        it. The agents gather evidence; only the recorded facts reach the rules.
+        The agents reach every evidence tool through Amazon Bedrock AgentCore Gateway, where a Cedar
+        policy engine evaluates the call. The tools record the facts; only the facts reach the rules.
       </p>
     </div>
   );

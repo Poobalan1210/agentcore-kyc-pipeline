@@ -18,7 +18,7 @@ section 9 lists what only a live rehearsal can confirm.
 | Disclosure slide with D-14's wording | In the deck | People |
 | Presenter photos on their personas' documents | `demo-assets/photos/demo-us-0N.jpg`, then `make demo-assets` | Presenters |
 | Each persona's ID printed, to hold up to the webcam | `demo-assets/generated/demo-us-0N-passport.pdf`, at 100% scale | Presenters |
-| Stacks deployed, Cedar LOG_ONLY | `make deploy` | Operator |
+| Stacks deployed, and the Cedar mode chosen: ENFORCE once section 5 passes, or LOG_ONLY, which Backstage labels *logging, not blocking* (a bare LOG_ONLY read as "the control is off") | `make deploy` (section 5 for ENFORCE) | Operator |
 | Presenter and reviewer accounts in their groups | `scripts/prepare_demo.py users ... --apply` | Operator |
 | The console's env file | section 6 of the README | Operator |
 | A full rehearsal, every act, recorded as a backup video | Section 3, end to end | Presenters |
@@ -44,7 +44,11 @@ the case goes to a reviewer (which the evals confirm, and which is correct).
    `scripts/prepare_demo.py reset --apply`.
    This is not optional. A list update left published from the last run means Nadia's Phase 1
    screening runs against the updated list: she is a CONFIRMED match at onboarding and is
-   declined, and Act 3 has no account to freeze.
+   declined, and Act 3 has no account to freeze. Reset also clears the device and network counts
+   the Fraud check reads (D-41), and leaves every case alone. The counts are of different people,
+   so restarting a persona never adds to them; the run of show's four personas stay at four, under
+   the five that would send a case to a person. Other names tried from the same browser do count
+   until the next Reset.
 2. **Decide any open reviews** left from the last run, so the queue on screen holds only today's.
 3. `make preflight` — every stack complete, controls clear, both groups populated, and where each
    persona stands. Exit 0 means ready.
@@ -70,6 +74,16 @@ console* on a phase opens that execution in the AWS console, for anyone who asks
 real. Backstage reads the execution history, so it needs the reviewer account; anyone else gets
 Story.
 
+Each agent lane (D-40) is labelled *AgentCore harness*. Its dot is where its tool's fact landed:
+green if the check passed, grey if it could not be established, red if it did not run.
+*Recorded* is that fact. *Said* is the agent's own words, which the rules never read. One line
+above Phase 1's lanes says this and shows the Cedar mode. Clicking a lane opens its drawer: the
+harness and its version, the Gateway and the Cedar policy engine (once the case has a decision
+record), the model and the tokens. Open it once on stage, for one agent, and leave the rest
+closed. **Large text** in the top bar makes the process side and the review console larger for
+the room and leaves the phone alone. Use it instead of browser zoom. With it on, Phase 1 is taller
+than the screen: scroll so the lanes you are talking about are in view.
+
 ---
 
 ## 3. Run of show
@@ -93,10 +107,15 @@ selfie, review, submit. Nothing reaches the bank until Submit.
    nothing to press and, on a demo deployment, nothing flashes (D-36).
 5. *Check and submit* lists everything → **Submit application**. This is when the four agents
    start. On Backstage: the submit flag at zero, the queue hand-over, then four agent bars running
-   side by side in one Parallel state, a green dot as each tool records its fact, then the rules,
-   the sealed record and the account, with the timer against the 90-second target. Point at the
-   bracket: four agents at once, not one after another. The feed under it lists every write as it
-   lands.
+   side by side in one Parallel state, a dot as each tool records its fact, then the rules, the
+   sealed record and the account, with the timer against the 90-second target. Point at the
+   bracket: four agents at once, not one after another. Say the legend line once: each agent is an
+   AgentCore harness that can reach its tool only through the Gateway; the tool writes the fact
+   (the dot); the agent writes its reply (the faint end of the bar); the rules read only the fact.
+   Fraud's tool counted how many different people applied from this laptop and this network in
+   the last 24 hours (*Within limits · 1 person from this device in 24 h* for the first
+   application after Reset); five from one device would send the case to a person. The feed under
+   it lists every write as it lands.
 6. The phone says *Verifying your identity*, with no counter: how long it takes is the bank's
    figure, on the right-hand side, from the case record's own timestamps. The board shows the
    same number.
@@ -153,8 +172,30 @@ selfie, review, submit. Nothing reaches the bank until Submit.
 Demo controls → Faults → *Sanctions screening* unavailable → Apply. Run *New application* →
 Taylor Jordan Reeves (DEMO-US-01). The Pre-Screen
 agent may well say "no match was found"; the screening fact records `performed: false`, and the
-rules send the case to a person. Show the two side by side in the console: the fact, and the
-sentence. **Reset afterwards.**
+rules send the case to a person. On Backstage it is one lane: a red dot, *Recorded: Not
+performed · UNAVAILABLE*, the agent's sentence quoted whole under *Said*, then *The rules read
+the fact above, never these words* and, two lanes down, *Decision engine: Refer to a person*.
+Point at those three; that is the whole point, in about fifteen seconds. **Reset afterwards.**
+
+### Questions the screen raises
+
+- *If the rules never read the reply, why wait for it?* The pipeline does wait: the rules start
+  once all four agents have answered, so the faint end of each bar (the reply, after the fact
+  landed) is on the clock. The reply is not wasted, though: the reviewer reads it, in the review
+  console's agent narrative, beside the facts.
+- *Can I see the agent's steps inside the harness?* Not on this screen. The harness emits no agent
+  or tool spans (D-38), so the split in a bar comes from two timestamps, not from a trace.
+  AgentCore's own trace view in CloudWatch is the place to look, if it shows them (section 9).
+- *Is Cedar blocking anything?* Under LOG_ONLY, no: every call to a Gateway tool is evaluated and
+  logged, and none is refused. Under ENFORCE a call the policies do not permit is refused before
+  the tool runs (section 5). Either way, each harness exposes only its own allowed tools.
+- *Isn't one laptop opening accounts for three people suspicious?* Yes, and that is what the
+  Fraud count measures: five different people from one device in a day sends the case to a
+  person. The run of show stays under it, and Reset clears the counts before each run. What is
+  stored is a keyed hash of the browser's random id and of the network, never the IP address.
+- *Where did the reviewer's rationale go?* Into the sealed decision record with the decision, not
+  into any log or execution history. To show it: All cases → the case's row (or Review queue →
+  *Open any case*) → *Decisions* → *Latest sealed audit record*.
 
 ---
 
@@ -171,6 +212,9 @@ sentence. **Reset afterwards.**
 | A case whose ID was photographed goes to a reviewer (*We're reviewing your application*), its process showing the document not read | Glare, blur or a page held too far away: the MRZ did not read, and an unreadable document is a person's call, not a retry | Decide it in the Review queue (it failed closed, which is the property), or start a new application for the persona and upload its JPEG. Rehearse the camera under the stage lighting (section 9) |
 | Colours flash, or a *Start the face check* button appears | The deployment runs the light challenge (`LIVENESS_CHALLENGE=FaceMovementAndLightChallenge`) | Expected for that setting. For the demo: `make deploy` with demo controls on, or redeploy `KycApi` with `-c livenessChallenge=FaceMovementChallenge` |
 | A case goes to review unexpectedly (*A check could not run*) | An agent timed out or returned nothing, or a tool was down | It failed closed: show it in the console, approve with a rationale. That is the property, not a bug |
+| Fraud says *Velocity critical* and the case goes to a reviewer | Five or more different people applied from this browser (or ten from this network) since the last Reset, rehearsal names included | Decide it in the Review queue: it is the rule working. Before the next run: Reset, then a new application |
+| Fraud is grey, *Not established* | The application reached the API without a device id or an address, or the hash key or the count store failed; the application went ahead anyway | Nothing on stage. Afterwards, the intake Lambda's log says why (`velocity not captured`) |
+| The review screen says *We couldn't confirm a live person* | The face check did not pass (light, angle, distance) | *Redo the selfie video*. Submitting anyway is allowed: the bank asks for it again, and a third failure goes to a person |
 | Decided in more than 90 s | Cold start or a slow agent | Say the number. Point to the rehearsal p50/p95 in `docs/MEASUREMENTS.md` |
 | *Handing off to review* on a queue row | The task token is written a moment after queueing | Wait a few seconds; the console refreshes |
 | *Review window expired* on a queue row | The review task timed out (7 days) | Not a stage issue: re-drive the execution afterwards |
@@ -273,6 +317,19 @@ The offline evals run the real tools and the real rules; they cannot run the par
 - Rekognition matching each presenter's face to the photo on their document
 - the end-to-end time to decision, and its p95 (`make measure`)
 - EventBridge fan-out and Phase 3 timing for the list update
+- the device and network counts (D-41): `kms:GenerateMac` from the intake Lambda, Fraud's lane
+  green with *1 person from this device* after a Reset, and the count behind the venue network,
+  where the whole room shares one public address
+- the reviewer's rationale in the sealed record (D-42): decide Act 2, then open the case's
+  *Decisions* tab and its *Latest sealed audit record*
 - the Backstage timeline during a live run end to end; it has been checked against a real
   finished case and with recorded histories, not yet while a run is in flight
+- the agent lanes with real replies (D-40): each *Said* within its four lines, Act 4's sentence
+  whole, and the Cedar line showing the mode from the start of a run (needs KycApi deployed with
+  the Gateways' mode: `make deploy`)
+- whether AgentCore's own trace view in CloudWatch now shows each harness's model turns and tool
+  calls. In September the build found no agent spans (D-38). Ten minutes after a rehearsal run;
+  if they are there, that is the honest way to show an agent's internal steps
+- the screens in front of a few real people: the cold read behind D-40 was an AI viewer, on
+  made-up cases and a mock
 - the Cedar decisions (`make check-policies`)

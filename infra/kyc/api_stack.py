@@ -29,9 +29,10 @@ authorizer proves only who the caller is:
   POST /demo/reset                          demo_fn        presenters   (demo deployments only)
 
 Five Lambdas, because the capability sets are disjoint: liveness needs Rekognition, intake needs
-the ingress queue, the console needs the audit bucket and the task-token release, the account
-routes need only the account platform, and the demo routes need write access to two parameters
-and the lifecycle bus — a single function would hold the union of all five.
+the ingress queue and the velocity store, the console needs the audit bucket and the task-token
+release, the account routes need only the account platform, and the demo routes need write
+access to two parameters, the lifecycle bus and the velocity store — a single function would hold
+the union of all five.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ from .config import (
     LIST_OVERLAY_PARAMETER,
     LIVENESS_CHALLENGES,
     LIVENESS_LIGHT_CHALLENGE,
+    POLICY_ENFORCEMENT_MODES,
     PROJECT,
 )
 
@@ -128,6 +130,10 @@ class ApiStack(Stack):
                  phase1_state_machine_arn: str,
                  # The account platform, for the account routes and the console's account view.
                  account_function_arn: str,
+                 # D-41: the velocity store the Fraud agent's tool counts (`KycTools`). Intake
+                 # adds one row per person per device and per network; the demo Reset clears it.
+                 velocity_table_name: str,
+                 velocity_table_arn: str,
                  phase2_state_machine_arn: str | None = None,
                  phase3_state_machine_arn: str | None = None,
                  # The lifecycle bus a list update is published to (Act 3).
@@ -139,11 +145,19 @@ class ApiStack(Stack):
                  # D-36: which Face Liveness challenge every session asks for. The service
                  # default unless the app chooses otherwise (it does, for a demo).
                  liveness_challenge: str = LIVENESS_LIGHT_CHALLENGE,
+                 # D-40: the mode the Cedar policy engines are attached in, so the console can say
+                 # how tool calls are governed while a run is in progress, before any decision
+                 # record pins it. Omitted, the trace reports the mode as unknown.
+                 policy_enforcement: str | None = None,
                  **kwargs) -> None:
         if liveness_challenge not in LIVENESS_CHALLENGES:
             raise ValueError(
                 f"liveness_challenge must be one of {LIVENESS_CHALLENGES}, "
                 f"got {liveness_challenge!r}")
+        if policy_enforcement is not None and policy_enforcement not in POLICY_ENFORCEMENT_MODES:
+            raise ValueError(
+                f"policy_enforcement must be one of {POLICY_ENFORCEMENT_MODES}, "
+                f"got {policy_enforcement!r}")
         super().__init__(scope, construct_id, **kwargs)
         machine_arns = {"PHASE1_STATE_MACHINE_ARN": phase1_state_machine_arn,
                         "PHASE2_STATE_MACHINE_ARN": phase2_state_machine_arn,
@@ -215,6 +229,21 @@ class ApiStack(Stack):
             self, "BiometricKeyForLiveness", biometric_key_arn
         ).grant_encrypt_decrypt(self.liveness_fn)
 
+        # ------------------------------------------------------------ intake hash key (D-41)
+        #
+        # The device id and the network an application came from are stored only as HMACs under
+        # this key, which never leaves KMS: an unkeyed hash of an IPv4 address is reversed by
+        # trying all 2^32 of them. Intake may compute a MAC with it and do nothing else.
+        self.intake_hash_key = kms.Key(
+            self, "IntakeHashKey",
+            key_spec=kms.KeySpec.HMAC_256,
+            key_usage=kms.KeyUsage.GENERATE_VERIFY_MAC,
+            description=("Keyed hashes of the device and network an application came from, for "
+                         "velocity (D-41). The rows they key expire after 24 hours."),
+            removal_policy=RemovalPolicy.DESTROY,
+            pending_window=Duration.days(7),
+        )
+
         # ------------------------------------------------------------ applicants Lambda (14.3)
         self.applicants_fn = lambda_.Function(
             self, "ApplicantsFunction",
@@ -234,6 +263,8 @@ class ApiStack(Stack):
             environment={
                 **common_env,
                 "APPLICANTS_QUEUE_URL": applicants_queue_url,
+                "VELOCITY_TABLE_NAME": velocity_table_name,
+                "INTAKE_HASH_KEY_ID": self.intake_hash_key.key_arn,
                 **{f"EVIDENCE_BUCKET_{code.upper()}": name
                    for code, name in evidence_bucket_names.items()},
             },
@@ -270,6 +301,18 @@ class ApiStack(Stack):
         applicants_queue = sqs.Queue.from_queue_arn(
             self, "ApplicantsQueueRef", applicants_queue_arn)
         applicants_queue.grant_send_messages(self.applicants_fn)
+        self.applicants_fn.add_to_role_policy(iam.PolicyStatement(
+            sid="CountApplicationVelocity",
+            # D-41: one row per person per device and per network. PutItem on the velocity store
+            # only; the case table still gets none (`ReadWriteOwnCase` above says why).
+            actions=["dynamodb:PutItem"],
+            resources=[velocity_table_arn],
+        ))
+        self.applicants_fn.add_to_role_policy(iam.PolicyStatement(
+            sid="HashIntakeIdentifiers",
+            actions=["kms:GenerateMac"],
+            resources=[self.intake_hash_key.key_arn],
+        ))
 
         # ------------------------------------------------------------ review Lambda (14.3)
         self.review_fn = lambda_.Function(
@@ -292,6 +335,7 @@ class ApiStack(Stack):
                 "AUDIT_BUCKET_NAME": audit_bucket_name,
                 "ACCOUNT_FUNCTION_NAME": account_function_arn,
                 **machine_arns,
+                **({"POLICY_ENFORCEMENT": policy_enforcement} if policy_enforcement else {}),
             },
             description=(
                 "GET /review/queue, POST /review/{id}/decision, GET /review/{id}/trace, "
@@ -414,6 +458,7 @@ class ApiStack(Stack):
                     "LIST_OVERLAY_PARAMETER": LIST_OVERLAY_PARAMETER,
                     "LIFECYCLE_BUS_NAME": lifecycle_bus_name,
                     "LIST_UPDATE_SETTLE_SECONDS": "4",
+                    "VELOCITY_TABLE_NAME": velocity_table_name,
                 },
                 description=("Presenter controls: demo faults and a synthetic sanctions list "
                              "update (Act 3). Presenters group only; demo deployments only."),
@@ -432,6 +477,13 @@ class ApiStack(Stack):
                 sid="FindOpenAccounts",
                 actions=["dynamodb:Query"],
                 resources=[f"{case_table_arn}/index/state-index"],
+            ))
+            self.demo_fn.add_to_role_policy(iam.PolicyStatement(
+                sid="ClearVelocityCounts",
+                # Reset clears the device and network counts (D-41). Scan and delete on the
+                # velocity store only: the case table stays read-only to this function.
+                actions=["dynamodb:Scan", "dynamodb:BatchWriteItem"],
+                resources=[velocity_table_arn],
             ))
             kms.Key.from_key_arn(self, "CaseKeyForDemo", case_key_arn).grant_decrypt(
                 self.demo_fn)

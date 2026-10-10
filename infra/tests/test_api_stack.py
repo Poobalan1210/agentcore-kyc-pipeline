@@ -33,6 +33,8 @@ COMMON = dict(
     phase3_state_machine_arn=(
         "arn:aws:states:us-east-1:123456789012:stateMachine:kyc90-phase3-lifecycle"),
     account_function_arn="arn:aws:lambda:us-east-1:123456789012:function:kyc90-account-stub",
+    velocity_table_name="kyc90-velocity",
+    velocity_table_arn="arn:aws:dynamodb:us-east-1:123456789012:table/kyc90-velocity",
     lifecycle_bus_arn="arn:aws:events:us-east-1:123456789012:event-bus/kyc90-lifecycle",
     lifecycle_bus_name="kyc90-lifecycle",
 )
@@ -204,19 +206,25 @@ def test_applicants_function_can_update_but_not_put_the_case(template: Template)
     persisted to the same item *before* intake runs (F-40's 3-minute window). `PutItem` is
     deliberately not granted: with it, a change back to a put would silently overwrite that
     evidence instead of failing, and lost liveness evidence is invisible until a case is stepped
-    up for the wrong reason — which is exactly the bug this replaced."""
+    up for the wrong reason — which is exactly the bug this replaced. The function's one PutItem
+    is on the velocity store (D-41), never the case table."""
     policies = template.find_resources("AWS::IAM::Policy")
     policy = next(body for name, body in policies.items() if "ApplicantsFunction" in name)
-    actions = set()
+    case_actions: set[str] = set()
+    put_resources: list[str] = []
     for stmt in policy["Properties"]["PolicyDocument"]["Statement"]:
         action = stmt.get("Action")
-        if isinstance(action, list):
-            actions.update(action)
-        elif action:
-            actions.add(action)
-    assert "dynamodb:UpdateItem" in actions
-    assert "dynamodb:GetItem" in actions
-    assert "dynamodb:PutItem" not in actions
+        actions = action if isinstance(action, list) else [action]
+        resource = stmt.get("Resource")
+        resources = resource if isinstance(resource, list) else [resource]
+        if COMMON["case_table_arn"] in resources:
+            case_actions.update(actions)
+        if "dynamodb:PutItem" in actions:
+            put_resources.extend(resources)
+    assert "dynamodb:UpdateItem" in case_actions
+    assert "dynamodb:GetItem" in case_actions
+    assert "dynamodb:PutItem" not in case_actions
+    assert put_resources == [COMMON["velocity_table_arn"]]
 
 
 def test_review_function_can_read_execution_history_but_not_control_executions(
@@ -310,7 +318,9 @@ def test_the_account_routes_can_only_invoke_the_account_platform(template: Templ
         "arn:aws:lambda:us-east-1:123456789012:function:kyc90-account-stub")
 
 
-def test_the_demo_function_writes_only_the_two_controls(template: Template) -> None:
+def test_the_demo_function_writes_only_the_two_controls_and_the_velocity_counts(
+    template: Template
+) -> None:
     resources = _statement(template, "WriteDemoControls")["Resource"]
     assert resources == [
         "arn:aws:ssm:us-east-1:123456789012:parameter/kyc90/demo/faults",
@@ -318,9 +328,20 @@ def test_the_demo_function_writes_only_the_two_controls(template: Template) -> N
     assert _statement(template, "PublishListUpdate")["Resource"] == (
         "arn:aws:events:us-east-1:123456789012:event-bus/kyc90-lifecycle")
     actions = _actions_of(template, "DemoFunction")
-    for forbidden in ("dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:Scan",
+    for forbidden in ("dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:DeleteItem",
                       "lambda:InvokeFunction", "states:StartExecution"):
         assert forbidden not in actions, forbidden
+    # D-41: Reset clears the device and network counts, and the scan and the deletes reach the
+    # velocity store and nothing else, the case table included.
+    for name, body in template.find_resources("AWS::IAM::Policy").items():
+        if "DemoFunction" not in name:
+            continue
+        for stmt in body["Properties"]["PolicyDocument"]["Statement"]:
+            action = stmt.get("Action")
+            granted = set(action if isinstance(action, list) else [action])
+            if granted & {"dynamodb:Scan", "dynamodb:BatchWriteItem"}:
+                assert stmt.get("Sid") == "ClearVelocityCounts"
+                assert stmt["Resource"] == COMMON["velocity_table_arn"]
 
 
 def test_the_liveness_function_reads_and_writes_by_key_only(template: Template) -> None:

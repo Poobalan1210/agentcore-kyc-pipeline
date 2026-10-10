@@ -34,7 +34,8 @@ export type IconName =
   | "skip"
   | "shield"
   | "arrow"
-  | "info";
+  | "info"
+  | "text";
 
 const PATHS: Record<IconName, ReactNode> = {
   logo: (
@@ -176,6 +177,13 @@ const PATHS: Record<IconName, ReactNode> = {
     <>
       <circle cx="12" cy="12" r="8.5" />
       <path d="M12 11v5.2M12 7.8v.1" />
+    </>
+  ),
+  // A large and a small A: the size of the type.
+  text: (
+    <>
+      <path d="M3 18.5 7.7 5.5h1.1l4.7 13M4.8 14h7" />
+      <path d="M14.2 18.5 17.3 10h.9l3.1 8.5M15.3 15.6h5" />
     </>
   ),
 };

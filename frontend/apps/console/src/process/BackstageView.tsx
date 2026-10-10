@@ -1,9 +1,18 @@
-import { MouseEvent, useLayoutEffect, useRef, useState } from "react";
+import { CSSProperties, MouseEvent, useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../console/icons";
 import { navigate } from "../console/route";
 import { STATUS_LABEL, StatusMark } from "./marks";
 import type { StageGroup } from "./pipeline";
-import type { Backstage, FeedItem, Lane, LaneTone, Mark, PhaseTimeline, Segment } from "./timeline";
+import type {
+  Backstage,
+  FeedItem,
+  Governance,
+  Lane,
+  LaneTone,
+  Mark,
+  PhaseTimeline,
+  Segment,
+} from "./timeline";
 import "./BackstageView.css";
 
 /**
@@ -25,7 +34,7 @@ export function BackstageView({
     <div className="bs">
       {applicant ? <PhoneStrip group={applicant} /> : null}
       {backstage.phases.map((phase) => (
-        <PhaseCard key={phase.id} phase={phase} />
+        <PhaseCard key={phase.id} phase={phase} governance={backstage.governance} />
       ))}
       <Feed items={backstage.feed} now={now} />
     </div>
@@ -55,9 +64,66 @@ function PhoneStrip({ group }: { group: StageGroup }) {
   );
 }
 
+// ------------------------------------------------------------------------------- how a check runs
+
+const POLICY_MODE: Record<NonNullable<Governance["policyMode"]>, { label: string; title: string }> = {
+  LOG_ONLY: {
+    label: "logging, not blocking",
+    title: "LOG_ONLY: each call's Cedar decision is logged, and no call is refused.",
+  },
+  ENFORCE: {
+    label: "enforcing",
+    title: "ENFORCE: a call the policies do not permit is refused before the tool runs.",
+  },
+};
+
+/**
+ * What an agent lane's marks mean, in one line, left to right as a bar reads: the harness calling
+ * its tool through the Gateway (and the Cedar mode governing that call), the fact the tool wrote,
+ * the reply, and what the agent's words are for. The ids, model and tokens are in each lane's
+ * drawer, so the lanes stay readable from the back of the room.
+ */
+function Legend({ governance }: { governance: Governance }) {
+  const mode = governance.policyMode ? POLICY_MODE[governance.policyMode] : null;
+  const source =
+    governance.policySource === "record"
+      ? " As pinned on this case's decision record."
+      : governance.policySource === "deployment"
+        ? " As this deployment attaches it."
+        : "";
+  return (
+    <p className="tl-legend">
+      <span className="tl-legend__item">
+        <span className="tl-key tl-key--call" aria-hidden="true" />
+        calling its tool through AgentCore Gateway
+        <span
+          className={`tl-policy tl-policy--${(governance.policyMode ?? "unknown").toLowerCase()}`}
+          title={
+            "A Cedar policy engine attached to the Gateway evaluates every call to a Gateway tool." +
+            (mode ? ` ${mode.title}` : "") +
+            " Either way, each harness exposes only its allowed tools." +
+            source
+          }
+        >
+          Cedar policy{mode ? ` · ${mode.label}` : ""}
+        </span>
+      </span>
+      <span className="tl-legend__item">
+        <span className="tl-key tl-key--fact" aria-hidden="true" /> its tool writes the fact
+      </span>
+      <span className="tl-legend__item">
+        <span className="tl-key tl-key--reply" aria-hidden="true" /> writing its reply
+      </span>
+      <span className="tl-legend__item tl-legend__said">
+        <b>Said</b> The rules never read this; the reviewer sees it as narrative.
+      </span>
+    </p>
+  );
+}
+
 // ------------------------------------------------------------------------------- a phase
 
-function PhaseCard({ phase }: { phase: PhaseTimeline }) {
+function PhaseCard({ phase, governance }: { phase: PhaseTimeline; governance: Governance }) {
   const [open, setOpen] = useState<string | null>(null);
   const label = phase.steady ? "Watching" : phase.label ?? STATUS_LABEL[phase.status];
   return (
@@ -93,6 +159,8 @@ function PhaseCard({ phase }: { phase: PhaseTimeline }) {
           ) : null}
         </div>
       </header>
+
+      {phase.path ? <Legend governance={governance} /> : null}
 
       {phase.lanes.length ? (
         <div className={`tl${phase.note ? " tl--waiting" : ""}`}>
@@ -151,12 +219,18 @@ function AxisRow({ phase }: { phase: PhaseTimeline }) {
   );
 }
 
-/** A label on the axis for a line drawn down the lanes; kept inside the track at either end. */
+/**
+ * A label on the axis for a line drawn down the lanes. Shifted left by as much of its own width
+ * as its line is along the axis, so it stays inside the track at either end however narrow the
+ * track gets (a case page, a narrow window, large text).
+ */
 function Flag({ at, span, tone, text }: { at: number; span: number; tone: string; text: string }) {
-  const where = at / span;
-  const align = where > 0.72 ? " tl-axis-flag--end" : where < 0.08 ? " tl-axis-flag--start" : "";
+  const where = Math.min(1, Math.max(0, at / span));
   return (
-    <span className={`tl-axis-flag tl-axis-flag--${tone}${align}`} style={{ left: pct(at, span) }}>
+    <span
+      className={`tl-axis-flag tl-axis-flag--${tone}`}
+      style={{ left: pct(at, span), transform: `translateX(-${(where * 100).toFixed(1)}%)` }}
+    >
       {text}
     </span>
   );
@@ -206,6 +280,7 @@ function LaneRow({
           >
             {lane.name}
           </button>
+          {lane.harness ? <span className="tl-lane__harness">{lane.harness}</span> : null}
           <span className="tl-lane__sub">{lane.sub}</span>
         </span>
         <span className="tl-row__track">
@@ -228,21 +303,36 @@ function LaneRow({
             <span className="tl-line tl-line--now" style={{ left: pct(phase.now, phase.span) }} aria-hidden="true" />
           ) : null}
         </span>
-        <span className={`tl-row__result tl-result tl-result--${lane.status}`}>
-          {lane.result ? (
-            <span className="tl-result__text">{lane.result}</span>
-          ) : (
-            <span className="tl-result__none">—</span>
-          )}
-          {lane.reviewCaseId ? (
-            <button
-              type="button"
-              className="tl-result__action"
-              onClick={() => navigate("review", lane.reviewCaseId ?? undefined)}
-            >
-              Review now
-            </button>
+        <span className="tl-row__result">
+          <span className={`tl-result tl-result--${lane.status}`}>
+            {lane.recorded ? <span className="tl-result__key">Recorded</span> : null}
+            {lane.result ? (
+              <span className="tl-result__text">{lane.result}</span>
+            ) : (
+              <span className="tl-result__none">—</span>
+            )}
+            {lane.reviewCaseId ? (
+              <button
+                type="button"
+                className="tl-result__action"
+                onClick={() => navigate("review", lane.reviewCaseId ?? undefined)}
+              >
+                Review now
+              </button>
+            ) : null}
+          </span>
+          {lane.said ? (
+            <span className="tl-said" title={lane.said}>
+              <span className="tl-said__key">Said</span>
+              <span className="tl-said__text">“{lane.said}”</span>
+            </span>
+          ) : lane.saidMissing ? (
+            <span className="tl-said tl-said--missing">
+              <span className="tl-said__key">Said</span>
+              <span className="tl-said__text">{lane.saidMissing}</span>
+            </span>
           ) : null}
+          {lane.saidNote ? <span className="tl-said__note">{lane.saidNote}</span> : null}
         </span>
       </div>
       {open ? <LaneDetail id={`tl-detail-${phase.id}-${lane.id}`} lane={lane} /> : null}
@@ -253,10 +343,20 @@ function LaneRow({
 function SegmentBar({ segment, phase, tone }: { segment: Segment; phase: PhaseTimeline; tone: LaneTone }) {
   const end = segment.end ?? phase.now ?? segment.start;
   const width = (Math.max(0, end - segment.start) / phase.span) * 100;
+  // An agent's bar, split where its tool's fact landed: the part before it, then the reply.
+  const split =
+    segment.split !== undefined && segment.split !== null && end > segment.start
+      ? Math.min(100, Math.max(0, ((segment.split - segment.start) / (end - segment.start)) * 100))
+      : null;
+  const style: CSSProperties & { "--split"?: string } = {
+    left: pct(segment.start, phase.span),
+    width: `max(${Math.min(100, width)}%, 3px)`,
+  };
+  if (split !== null) style["--split"] = `${split.toFixed(2)}%`;
   return (
     <span
-      className={`tl-seg tl-seg--${tone} tl-seg--${segment.status}`}
-      style={{ left: pct(segment.start, phase.span), width: `max(${Math.min(100, width)}%, 3px)` }}
+      className={`tl-seg tl-seg--${tone} tl-seg--${segment.status}${split !== null ? " tl-seg--split" : ""}`}
+      style={style}
       title={segment.title}
     >
       {segment.label && width >= 16 ? <span className="tl-seg__label">{segment.label}</span> : null}
@@ -266,7 +366,11 @@ function SegmentBar({ segment, phase, tone }: { segment: Segment; phase: PhaseTi
 
 function MarkDot({ mark, span }: { mark: Mark; span: number }) {
   return (
-    <span className={`tl-mark tl-mark--${mark.kind}`} style={{ left: pct(mark.at, span) }} title={mark.title}>
+    <span
+      className={`tl-mark tl-mark--${mark.kind}${mark.tone ? ` tl-mark--${mark.tone}` : ""}`}
+      style={{ left: pct(mark.at, span) }}
+      title={mark.title}
+    >
       {mark.label ? <span className="tl-mark__label">{mark.label}</span> : null}
     </span>
   );

@@ -293,6 +293,9 @@ read it as "no reuse observed".
 
 **Rejected:** recording zero counts (true only if someone looked).
 
+**Since D-41:** intake captures both identifiers for applications made in the console. When it
+cannot, NOT_ESTABLISHED is still the result, for the reason above.
+
 ## D-30 — Offline evals run the real tools and the real rules
 
 **Decided:** `evals/` drives the six tools through the Gateway's Lambda entry point and the rules
@@ -454,3 +457,93 @@ six correctly is replaced too.
 **The cost, stated:** the Notify prompt still asks for "exactly which limits apply ... using the
 amounts", so most first messages are replaced until the prompt is changed. That change is a new
 harness version (`KycHarnesses`).
+
+## D-40 — An agent's lane shows what its tool recorded beside what the agent said
+**Decided:** on Backstage each agent lane is labelled as an AgentCore harness. The dot where its
+tool's fact landed is coloured by what the fact records, so a check that did not run is never
+green. The bar is split at that dot: before it the harness is calling its tool through the
+Gateway; after it the model is writing its reply. Beside the bar, *Recorded* is the fact and
+*Said* is the agent's own words, quoted from its first word. One line above Phase 1's lanes says
+what the marks mean and which mode the Gateway's Cedar policy engine is in. LOG_ONLY reads
+"logging, not blocking". The mode comes from the case's decision record (`policyEngineVersion`),
+or, while a run has no record yet, from the deployment: the review Lambda gets
+`POLICY_ENFORCEMENT`, the value the Gateways are attached in, and the trace returns it as
+`policyEnforcement`. The ids, model, tokens, harness version, Gateway and policy engine are in the
+lane's drawer. A fact is drawn on a lane only if it landed while that agent ran. Every re-screen
+rewrites the screening fact, so Phase 1's lane says its fact was since replaced rather than set a
+later result beside Phase 1's words. The review console shows the briefing and each reply as
+fields, not raw JSON. *Large text* in the bar zooms the process side, the review console and a
+case's page by 1.35; the phone and the bar keep their size.
+**Why:** a cold read of the old screens as three people (a cloud architect new to AgentCore, an
+AgentCore builder, a bank compliance lead) found AgentCore doing nothing visible and each agent
+reading as a tool wrapper. Act 4 was ambiguous: a green dot beside a red *Not performed*, and the
+agent's words nowhere. With a mock of these lanes all three could describe the steps, and Act 4's
+point landed in about fifteen seconds: screening did not run, the agent still said no match was
+found, and the rules sent the case to a person. In fifteen seconds viewers took in only the dot
+colours, *Not performed* against "no match", and *Refer to a person*, hence one line of legend and
+everything else in the drawer. Browser zoom is no answer for the room: it narrows the window,
+hides the AgentCore line in the bar and squeezes the timeline.
+**Rejected:** drawing model turns or tool arguments (the harness emits no agent or tool spans,
+D-38, so they would be invented); an excerpt of the reply (it read as cherry-picked); "one
+allowed tool" (Fraud also has Code Interpreter, which is outside the Gateway: the drawer lists
+the Gateway tools and the built-in apart); a bare `LOG_ONLY` badge (read as "the control is
+switched off").
+**The cost, stated:** the split is inferred from two timestamps, the fact's `recordedAt` and the
+end of the harness task. Which model turns fell on either side is not known. The rules start only
+when all four agents have answered, so reply time after a fact lands delays the decision even
+though the rules never read the reply; the reviewer does. The Cedar decision on each call is in
+CloudWatch, not here. The console's list of each agent's tools mirrors `infra/kyc/config.py` and
+`harnesses_stack.py` by hand. Before a record exists, the mode shown is the API's, so it is right
+only when KycApi was deployed with the Gateways' `policyEnforcement` (`make deploy` does both). An
+API deployed before this change reports no mode, and the line names Cedar without one. With
+Large text, Phase 1 is taller than a 1080p screen. The cold read was an AI viewer, on made-up
+cases and a cleaner mock than the full screen; a dry run with a few people is the check that
+counts.
+
+## D-41 — Velocity counts people per device and network, from intake, and Reset clears it
+**Decided:** the console sends a random device id with every application (`crypto.randomUUID()`,
+kept in the browser's local storage). Intake (`api/velocity.py`) hashes it, and the caller's
+network as API Gateway saw it (an IPv4 address, or an IPv6 /64), with a KMS HMAC key. It stores
+both hashes on the case as `intake` and writes one row per person under each into the velocity
+store, keyed by a hash of the declared name and date of birth and counted for 24 hours. The Fraud
+agent's tool counts those rows, so its fact says how many different people applied from this
+device and this network in a day, this application included: five from one device, or ten from
+one network, is critical and sends the case to a person. Reset (Demo controls, and
+`scripts/prepare_demo.py reset`) deletes every row and touches no case. Capture never stops an
+application: without the device id, the address, KMS or the store, the case carries neither hash
+and velocity stays NOT_ESTABLISHED (D-29).
+**Why:** the Fraud lane was grey on every case because nothing captured a device or IP, so Phase
+1's one fraud check never ran. Counting people rather than submissions is what velocity is for:
+many identities from one device is the synthetic-identity pattern, one person retrying is not.
+It also keeps a presenter's restarts from tripping the rule: the run of show's four personas stay
+at four however often they are run. Keyed hashes keep IP addresses out of the case record and the
+store; an unkeyed hash of an IPv4 address is reversed by trying all of them.
+**Rejected:** counting each submission (one restart on stage would be the fifth); a fingerprinting
+library (more invasive than the check needs, and still supplied by the client); raising the
+thresholds for the demo (the rule on stage would not be the rule); deleting cases to reset the
+counts (the counts live in their own table).
+**The cost, stated:** the device id is whatever the browser sends, so cleared storage or another
+browser is a new device, and someone who rotates it is caught only by the network count. Behind a
+venue's Wi-Fi the whole room shares one public address; only applications count, and only the
+presenter applies. The fact keeps its field names, `deviceApplications` and `ipApplications`, and
+each counts people. Not yet seen live: `kms:GenerateMac` from the intake Lambda, and the counts
+behind the venue network (runbook section 9).
+
+## D-42 — What the screens and records say happened is what happened
+**Decided:** three claims made true. The reviewer's rationale is sealed in the decision record
+(`decision.rationale`): the audit writer reads it from the review the handler stored
+(`<phase>Review`), and only when that review is the one being recorded (same reviewer, same
+instant). It never travels with the task token, so it stays out of execution history (R18.8). A
+confirmed match's explanation says the decision is flagged for compliance (`notifyCompliance`),
+not that anyone was notified, and the account platform's freeze event no longer claims
+`complianceNotified`. After three failed liveness checks the record says the case went to a
+reviewer, with `alternative_path_offered: false`, and the applicant's review screen shows a
+failed face check as failed, with the redo first and Submit still there.
+**Why:** each was a claim the system did not keep. The decision form promised the rationale was
+"recorded in the audit trail" while it lived only on the mutable case, and a Phase 3 rationale was
+deleted when the next lifecycle review was queued. Nothing reads `notifyCompliance`. No other way
+to verify is offered to the applicant. On stage, a failed face check showed "Live check complete"
+with a tick.
+**Rejected:** carrying the rationale in the resume payload (it would sit in execution history for
+90 days); sending a notification (a compliance referral with OFAC and SAR deadlines is a feature,
+not a wording fix); disabling Submit after a failed check (R30.2: no lockout).

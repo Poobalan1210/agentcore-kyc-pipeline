@@ -254,8 +254,8 @@ export function LivenessStep({
   }, []);
 
   // The result stays up for a moment, then the flow moves on: a failed check does not block the
-  // application. R30.2 (three failures route to a person with an alternative path, never a
-  // lockout) is enforced server-side, where the failures are counted.
+  // application, and the review says it failed and offers it again. R30.2 (three failures route
+  // to a person, never a lockout) is enforced server-side, where the failures are counted.
   const completeRef = useRef(onComplete);
   completeRef.current = onComplete;
   const doneLive = phase.kind === "done" ? phase.isLive : null;

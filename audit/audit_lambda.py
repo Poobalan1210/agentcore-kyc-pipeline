@@ -32,6 +32,26 @@ from spans import collect_evidence, evidence_from_case_record
 from writer import put_decision_record
 
 
+def _review_rationale(case: dict[str, Any], *, phase: str, decision: dict[str, Any],
+                      actor: str) -> str | None:
+    """The reviewer's rationale for this decision (D-42), from the review the handler recorded.
+
+    Read here, not carried through the state machine: the resume payload leaves free text about a
+    real person out of execution history on purpose (R18.8, `decisions.resume_payload`). Taken
+    only when the stored review is the one this record describes — the same reviewer, at the same
+    instant — so a later review on the same case can never lend its words to an earlier decision.
+    """
+    if str(decision.get("decidedBy") or "") != "REVIEWER":
+        return None
+    review = case.get(f"{phase}Review")
+    if not isinstance(review, dict) or str(review.get("reviewerId") or "") != actor:
+        return None
+    reviewed_at = str(decision.get("reviewedAt") or "")
+    if reviewed_at and str(review.get("decidedAt") or "") != reviewed_at:
+        return None
+    return str(review.get("rationale") or "").strip() or None
+
+
 def _case_record(applicant_id: str, *, table: str, client: Any) -> dict[str, Any]:
     response = client.get_item(
         TableName=table,
@@ -173,14 +193,16 @@ def lambda_handler(event: dict[str, Any], _context: Any = None) -> dict[str, Any
             evidence = from_case
 
     decided_at = datetime.now(timezone.utc)
+    # The reviewer's identity when a person decided (the state machine passes it from the
+    # review resume payload); `system` when the rules did. R6.3 needs the difference on the
+    # immutable record, not only on the case, which is mutable.
+    actor = str(event.get("actor") or "system")
     record = build_decision_record(
         case_record=case,
         evidence=evidence,
         outcome=decision,
-        # The reviewer's identity when a person decided (the state machine passes it from the
-        # review resume payload); `system` when the rules did. R6.3 needs the difference on the
-        # immutable record, not only on the case, which is mutable.
-        actor=str(event.get("actor") or "system"),
+        actor=actor,
+        rationale=_review_rationale(case, phase=phase, decision=decision, actor=actor),
         versions=VersionPins(
             harness_version=str(event.get("harnessVersion")
                                 or os.environ.get("HARNESS_VERSION", "")),

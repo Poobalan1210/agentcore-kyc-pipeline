@@ -533,13 +533,18 @@ class AccountPlatform:
 
     def freeze(self, applicant_id: str, *, outcome: str = "", reason: str = ""
                ) -> dict[str, Any]:
-        """R31.5. Every transaction refused, and compliance notified. Idempotent."""
+        """R31.5. Every transaction refused. Idempotent.
+
+        The platform notifies no one, and its event says nothing about compliance: the decision
+        that ordered the freeze carries the compliance flag (`notifyCompliance`), and a freeze
+        after a list update or risk event is queued for a reviewer by Phase 3 (D-42).
+        """
 
         def change(account: Account) -> None:
             if account.frozen:
                 return
             account.frozen = True
-            account.record("FROZEN", outcome=outcome, reason=reason, complianceNotified=True)
+            account.record("FROZEN", outcome=outcome, reason=reason)
 
         return self._update(applicant_id, change)
 

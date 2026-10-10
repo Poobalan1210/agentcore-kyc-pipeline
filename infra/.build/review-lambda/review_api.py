@@ -57,6 +57,17 @@ _PHASE_MACHINE_ENV = {"phase1": "PHASE1_STATE_MACHINE_ARN",
                       "phase2": "PHASE2_STATE_MACHINE_ARN",
                       "phase3": "PHASE3_STATE_MACHINE_ARN"}
 
+#: The modes a Gateway attaches its Cedar policy engine in (`infra/kyc/config.py`
+#: POLICY_ENFORCEMENT_MODES). Anything else is reported as unknown rather than guessed at.
+_POLICY_MODES = frozenset({"LOG_ONLY", "ENFORCE"})
+
+
+def _policy_enforcement() -> str | None:
+    """D-40 — the Cedar mode this deployment attached its policy engines in, for the console's
+    live view: a run in progress has no decision record yet to read the pinned mode from."""
+    mode = os.environ.get("POLICY_ENFORCEMENT", "").strip().upper()
+    return mode if mode in _POLICY_MODES else None
+
 
 def _is_reviewer(event: Mapping[str, Any]) -> bool:
     """R34.6 — an exact member of `reviewers`, from the verified claims."""
@@ -214,6 +225,9 @@ def get_trace(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]:
         "phaseStartedAt": {phase: _s(item.get(f"{phase}StartedAt"))
                            for phase in ("phase1", "phase2", "phase3")
                            if f"{phase}StartedAt" in item},
+        # How every tool call through the Gateway is governed: Cedar logging or enforcing. The
+        # decision record pins the mode each decision was made under; this is the deployment's.
+        "policyEnforcement": _policy_enforcement(),
     })
 
 

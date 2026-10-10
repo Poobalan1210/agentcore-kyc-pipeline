@@ -8,8 +8,10 @@ reads, so the demo exercises the real paths rather than a demo-only branch:
 * **A sanctions list update** — `POST /demo/list-update` adds listings to
   `/kyc90/screening/list-overlay`, then publishes one `SanctionsListUpdate` event per open account
   to the lifecycle bus. Phase 3 re-screens each account against the updated list. This is Act 3.
-* **Reset** — `POST /demo/reset` clears both. It does not unfreeze anything: a freeze is only ever
-  undone by a person, and resetting a demo is not a person deciding.
+* **Reset** — `POST /demo/reset` clears both, and the device and network counts the Fraud agent's
+  velocity tool reads (D-41), so a rehearsal's applications do not count against the show. It
+  does not unfreeze anything: nothing in this build unfreezes an account, and resetting a demo is
+  not a person deciding.
 
 And one read: `GET /demo/cases`, the newest cases with the time each took to decide, measured from
 the case record's own timestamps.
@@ -30,6 +32,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 import auth
+import velocity
 
 #: The six evidence tools a fault may mark unavailable (`tools/tool_schemas.py`).
 TOOLS = frozenset({"s3_get_document", "rekognition_compare_faces", "velocity_check",
@@ -340,8 +343,20 @@ def _s(attr: Any) -> str | None:
 def reset(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]:
     _write(_faults_name(), {})
     _write(_overlay_name(), {"entries": []})
-    return _response(200, {"faults": {}, "listOverlay": {"entries": []},
-                           "note": "frozen accounts stay frozen; only a reviewer changes that"})
+    body: dict[str, Any] = {
+        "faults": {}, "listOverlay": {"entries": []},
+        "note": "frozen accounts stay frozen; nothing in this build unfreezes one",
+    }
+    # The controls are already clear by now, so a failure here is reported, not raised: the
+    # presenter sees that the counts were not cleared and resets again.
+    import boto3
+
+    try:
+        body["velocityCleared"] = velocity.clear(boto3)
+    except Exception as exc:  # noqa: BLE001 - reported to the presenter
+        body["velocityCleared"] = None
+        body["velocityError"] = velocity.error_code(exc)
+    return _response(200, body)
 
 
 def _body(event: Mapping[str, Any]) -> Mapping[str, Any]:

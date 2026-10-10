@@ -20,7 +20,7 @@ import aws_cdk as cdk
 from aws_cdk import RemovalPolicy, Stack, aws_kms as kms
 from constructs import Construct
 
-from .config import JURISDICTIONS, PROJECT
+from .config import JURISDICTIONS, POLICY_ENFORCEMENT_MODES, PROJECT
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from tool_schemas import SCHEMAS, TARGET_NAMES, cedar_action  # noqa: E402
@@ -66,10 +66,6 @@ def _pascal_schema(node: dict) -> dict:
         else:
             out[pascal] = value
     return out
-
-
-#: The two modes a Gateway can attach its policy engine in. Deliberately a closed set.
-POLICY_ENFORCEMENT_MODES = ("LOG_ONLY", "ENFORCE")
 
 
 class GatewaysStack(Stack):

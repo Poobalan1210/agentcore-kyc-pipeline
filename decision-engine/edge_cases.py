@@ -302,13 +302,17 @@ def _r30_2_liveness_failures(f: EdgeFacts) -> EdgeVerdict | None:
         case_id="liveness_failed_three_times", requirement="R30.2",
         outcome=Phase1Outcome.MANUAL_REVIEW,
         explanation=(
-            f"Liveness failed {f.liveness_failure_count} times. Routed to a reviewer with an "
-            "alternative verification path and **no lockout** (D-05). Liveness fails for poor "
-            "lighting, low-end cameras and some disabilities, so a permanent lock would exclude "
-            "exactly the applicants least able to complain about it."
+            f"Liveness failed {f.liveness_failure_count} times. Routed to a reviewer instead of "
+            "asking again, with **no lockout** (D-05). Liveness fails for poor lighting, low-end "
+            "cameras and some disabilities, so a permanent lock would exclude exactly the "
+            "applicants least able to complain about it. The reviewer decides on the other "
+            "evidence; this build offers the applicant no other way to verify."
         ),
+        # `alternative_path_offered` stays in the record, false, so a reader can see the gap
+        # rather than infer from its absence that an alternative was offered.
         signals={"liveness_failure_count": f.liveness_failure_count,
-                 "alternative_path_offered": True,
+                 "routed_to_reviewer": True,
+                 "alternative_path_offered": False,
                  "permanent_lockout": False},
     )
 

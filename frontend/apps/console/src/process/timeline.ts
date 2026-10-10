@@ -7,6 +7,8 @@ import type {
   FactBase,
 } from "@shared/api/client";
 import { guardReason } from "../review/labels";
+import { readReply } from "./agentReply";
+import { AGENTS, harnessVersionOf, resourceId, toolRows } from "./agents";
 import type { Stage, StageGroup, StageStatus } from "./pipeline";
 
 /**
@@ -21,11 +23,16 @@ import type { Stage, StageGroup, StageStatus } from "./pipeline";
  * What the system does not record, this does not draw: the agents' turns inside a harness (each
  * model call, each tool call's arguments) are not emitted as spans by the harness surface
  * (`audit/spans.py`), so an agent's lane is its task, from invoke to answer, with its tool's fact
- * marked where it landed.
+ * marked where it landed. Two timestamps split that bar honestly (D-40): before the fact landed
+ * the harness was calling its tool through the Gateway, after it the model was writing its
+ * reply. Which model turns happened inside either part is not known, and not drawn.
  */
 
 export type LaneTone = "queue" | "sfn" | "agent" | "rules" | "seal" | "account" | "review" | "notify";
 export type SegmentStatus = "done" | "running" | "failed";
+/** A fact's dot, coloured by what the tool recorded: the checklist's own status for that check. */
+export type MarkTone = "done" | "warn" | "fail" | "skip";
+type FactName = keyof NonNullable<CaseTraceResponse["facts"]>;
 export type FeedSource =
   | "api"
   | "ddb"
@@ -51,6 +58,9 @@ export interface Segment {
   label?: string;
   /** The state as Step Functions names it, and how long it took. */
   title: string;
+  /** An agent's bar: when its tool's fact landed, in seconds from zero. Before it the harness was
+   * calling its tool; after it the model was writing its reply. */
+  split?: number | null;
 }
 
 export interface Mark {
@@ -59,6 +69,8 @@ export interface Mark {
   kind: "fact" | "flag" | "message";
   label?: string;
   title: string;
+  /** A fact's dot: what the tool recorded, so a check that did not run never shows green. */
+  tone?: MarkTone;
 }
 
 export interface Lane {
@@ -78,6 +90,25 @@ export interface Lane {
   /** The checklist row this lane does the work of: its detail opens under the lane. */
   stage?: Stage;
   facts?: Array<[string, string]>;
+  /** An agent's lane: "AgentCore harness". Its ids, model and tokens are in the drawer. */
+  harness?: string | null;
+  /** The result is a fact a tool recorded on the case, labelled "Recorded". */
+  recorded?: boolean;
+  /** What the agent said, in its own words: the "Said" line. Narrative only, never read by the
+   * rules. */
+  said?: string | null;
+  /** Why there is nothing to quote, when the harness run left no reply. */
+  saidMissing?: string | null;
+  /** Under the words, where they and the fact can disagree: the fact did not run. */
+  saidNote?: string | null;
+}
+
+/** How every call to a Gateway tool is governed: the Gateway's Cedar policy engine, and its mode. */
+export interface Governance {
+  /** Null when neither the case's decision record nor the API says. */
+  policyMode: "LOG_ONLY" | "ENFORCE" | null;
+  /** Pinned on this case's latest decision record, or the deployment's, as the API reports it. */
+  policySource: "record" | "deployment" | null;
 }
 
 export interface PhaseTimeline {
@@ -105,6 +136,8 @@ export interface PhaseTimeline {
   note: string | null;
   executionName: string | null;
   consoleUrl: string | null;
+  /** Show, above the lanes, the one-line legend for an agent lane's marks, with the Cedar mode. */
+  path?: boolean;
 }
 
 export interface FeedItem {
@@ -124,6 +157,7 @@ export interface Backstage {
   feed: FeedItem[];
   /** The clock the view was built at, for what counts as new in the feed. */
   now: number;
+  governance: Governance;
 }
 
 export interface BackstageInput {
@@ -428,53 +462,149 @@ function sfnLane(exec: ExecutionTrace | null, zero: number | null, fallbackMachi
 interface AgentSpec {
   key: string;
   states: string[];
-  name: string;
-  tools: string;
-  facts: Array<keyof NonNullable<CaseTraceResponse["facts"]>>;
+  facts: FactName[];
+}
+
+interface LaneContext {
+  trace: CaseTraceResponse | null;
+  steps: ExecutionStep[];
+  zero: number | null;
+  since: number | null;
+  /** The checklist, whose status for each check colours that check's fact. */
+  groups: StageGroup[];
+}
+
+/** A fact belongs to an agent's lane only if it landed while that agent ran. The screening fact is
+ * rewritten by every re-screen, so a later phase's would otherwise be drawn here, minutes out,
+ * and set beside this run's words as if it were this run's. Without a history to bound it (a case
+ * from before the runs were recorded), the phase's window alone decides. */
+function landedDuring(at: number, bars: Segment[]): boolean {
+  if (!bars.length) return true;
+  return bars.some((bar) => at >= bar.start - 1 && (bar.end === null || at <= bar.end + 2));
+}
+
+function landedAfter(at: number, bars: Segment[]): boolean {
+  return bars.length > 0 && bars.every((bar) => bar.end !== null && at > bar.end + 2);
+}
+
+/** The bar split where the last of its tool facts landed. */
+function withSplit(bar: Segment, marks: Mark[]): Segment {
+  const inside = marks
+    .filter((m) => m.at >= bar.start - 1 && (bar.end === null || m.at <= bar.end + 2))
+    .map((m) => Math.max(bar.start, bar.end === null ? m.at : Math.min(m.at, bar.end)));
+  if (!inside.length) return bar;
+  const split = Math.max(...inside);
+  return {
+    ...bar,
+    split,
+    title: `${bar.title} · calling its tool until its fact landed at +${duration(split)}, ` +
+      "then writing its reply",
+  };
+}
+
+function factTone(groups: StageGroup[], name: FactName): MarkTone {
+  const status = stageById(groups, FACT_STAGE[name])?.status;
+  return status === "fail" || status === "warn" || status === "skip" ? status : "done";
+}
+
+/** Where an agent's words and its fact can disagree, said under the words. */
+const NARRATIVE_ONLY = "The rules read the fact above, never these words.";
+
+/**
+ * The drawer's rows on what governed an evidence agent's tool calls, as this case's decision
+ * record pinned them: the Gateway, and the Cedar policy engine with the mode it was attached in.
+ * Resource ids only, so no account number goes up on the screen. Absent until a record exists.
+ */
+function governedBy(trace: CaseTraceResponse | null): Array<[string, string]> {
+  const versions = trace?.decision?.versions;
+  const rows: Array<[string, string]> = [];
+  const gateway = resourceId(versions?.gatewayArn);
+  if (gateway) rows.push(["AgentCore Gateway", gateway]);
+  const engine = resourceId(versions?.policyEngineVersion);
+  const mode = policyMode(versions?.policyEngineVersion?.split("#")[1]);
+  if (engine) {
+    rows.push(["Cedar policy engine", `${engine}${mode ? ` · ${mode === "ENFORCE" ? "ENFORCE" : "LOG_ONLY, logging, not blocking"}` : ""}`]);
+  }
+  return rows;
 }
 
 function agentLane(
   spec: AgentSpec,
   phase: "phase1" | "phase2" | "phase3",
-  ctx: { trace: CaseTraceResponse | null; steps: ExecutionStep[]; zero: number | null; since: number | null },
+  ctx: LaneContext,
   result: { stage?: Stage; status: StageStatus; text: string | null },
   options: { parallel?: boolean; tone?: LaneTone } = {},
 ): Lane {
+  const info = AGENTS[spec.key];
   const steps = ctx.steps.filter((s) => spec.states.includes(s.name) && kindOf(s) !== "other");
   const run = agentRun(ctx.trace, phase, spec.key);
-  const model = modelName(run?.model);
-  const used = tokens(run?.totalTokens);
+  // No label inside an agent's bar: the tool's name there read as "the tool took this long".
+  const bars = segmentsOf(steps, ctx.zero, () => "");
   const marks: Mark[] = [];
+  let replaced = false;
+  let notPerformed = false;
   for (const name of spec.facts) {
     const fact = factIn(ctx.trace?.facts?.[name] ?? null, ctx.since);
     const at = offset(str(fact?.recordedAt), ctx.zero);
-    if (fact && at !== null) {
-      marks.push({ at, kind: "fact", title: `${FACT_TOOL[name]} recorded its fact · +${duration(at)}` });
+    if (!fact || at === null) continue;
+    if (!landedDuring(at, bars)) {
+      replaced = replaced || landedAfter(at, bars);
+      continue;
     }
+    if (fact.performed === false) notPerformed = true;
+    marks.push({
+      at,
+      kind: "fact",
+      tone: factTone(ctx.groups, name),
+      title: `${FACT_TOOL[name]} recorded its fact · +${duration(at)}` +
+        (fact.performed === false ? " · the check did not run" : ""),
+    });
   }
-  const facts: Array<[string, string]> = [["Tools", spec.tools]];
+  // The fact this run recorded was rewritten later; its time and value are gone from the case.
+  const lost = replaced && marks.length === 0;
+  const reply = readReply(run?.narrative);
+  const harnessId = steps.map((s) => s.target).find(Boolean) ?? `kyc90_${spec.key}`;
+  const version = harnessVersionOf(ctx.trace?.decision?.versions?.harnessVersion, spec.key);
+  // The ids, the model and the tokens are in the drawer; the lane itself says only what it is.
+  const facts: Array<[string, string]> = [
+    ["AgentCore harness", harnessId],
+    ["Endpoint", `live${version ? ` · harness version ${version}` : ""}`],
+    ...toolRows(spec.key),
+    ...governedBy(ctx.trace),
+  ];
   if (run?.model) facts.push(["Model", run.model]);
   if (run?.totalTokens) facts.push(["Tokens", run.totalTokens.toLocaleString("en-US")]);
   if (run?.latencyMs) facts.push(["Harness time", duration(run.latencyMs / 1000)]);
   if (run?.stopReason) facts.push(["Stop reason", run.stopReason]);
+  if (reply?.said) facts.push(["Said", reply.said]);
+  const status: StageStatus = lost
+    ? "skip"
+    : steps.length || marks.length ? result.status : result.stage?.status ?? "idle";
   return {
     id: spec.key,
-    name: spec.name,
-    // The model and what it used once the run is on the record; until then, the tool it calls.
-    sub: model || used ? [model, used].filter(Boolean).join(" · ") : spec.tools,
+    name: info?.name ?? spec.key,
+    harness: "AgentCore harness",
+    sub: info?.tool ?? "",
     tone: options.tone ?? "agent",
     parallel: options.parallel,
-    segments: segmentsOf(steps, ctx.zero, () => spec.tools),
+    segments: bars.map((bar) => withSplit(bar, marks)),
     marks,
-    status: steps.length || marks.length ? result.status : result.stage?.status ?? "idle",
-    result: result.text,
+    status,
+    result: lost ? "Since replaced by a later re-screen" : result.text,
+    // "Recorded" only once this run's fact is on the case: before it lands there is nothing to label.
+    recorded: marks.length > 0 || lost,
+    said: reply?.said ?? null,
+    saidMissing: !reply && run?.status && run.status !== "OK"
+      ? "No reply: the harness run failed or returned nothing"
+      : null,
+    saidNote: notPerformed && reply?.said && status === "fail" ? NARRATIVE_ONLY : null,
     stage: result.stage,
     facts,
   };
 }
 
 /** The tool that records each fact, for the dot's title and the feed. */
-const FACT_TOOL: Record<keyof NonNullable<CaseTraceResponse["facts"]>, string> = {
+const FACT_TOOL: Record<FactName, string> = {
   documentExtraction: "s3_get_document",
   faceMatch: "rekognition_compare_faces",
   velocity: "velocity_check",
@@ -484,7 +614,7 @@ const FACT_TOOL: Record<keyof NonNullable<CaseTraceResponse["facts"]>, string> =
 };
 
 /** The checklist stage whose words describe each fact. */
-const FACT_STAGE: Record<keyof NonNullable<CaseTraceResponse["facts"]>, string> = {
+const FACT_STAGE: Record<FactName, string> = {
   documentExtraction: "doc-read",
   faceMatch: "face-match",
   velocity: "fraud",
@@ -517,25 +647,41 @@ function kindLane(
   };
 }
 
+/** The briefing written for this phase's review, if one was. */
+function briefingFor(trace: CaseTraceResponse | null, phase: string): string | null {
+  const briefing = trace?.review?.briefing;
+  return briefing && briefing.phase === phase && briefing.text ? briefing.text : null;
+}
+
 function reviewLanes(
   steps: ExecutionStep[],
   zero: number | null,
   stage: Stage | undefined,
   run: AgentNarrative | undefined,
+  briefingText: string | null,
 ): Lane[] {
   const lanes: Lane[] = [];
   const briefing = steps.filter((s) => kindOf(s) === "briefing");
   if (briefing.length) {
+    const written = readReply(briefingText);
+    const facts: Array<[string, string]> = [
+      ["AgentCore harness", briefing.map((s) => s.target).find(Boolean) ?? "kyc90_briefing"],
+      ...toolRows("briefing"),
+    ];
+    if (run?.model) facts.push(["Model", run.model]);
+    if (written?.said) facts.push(["Said", written.said]);
     lanes.push({
       id: "briefing",
-      name: "Briefing agent",
-      sub: [modelName(run?.model), tokens(run?.totalTokens)].filter(Boolean).join(" · ") ||
-        "Explains, never decides",
+      name: AGENTS.briefing.name,
+      harness: "AgentCore harness",
+      sub: AGENTS.briefing.tool,
       tone: "agent",
       segments: segmentsOf(briefing, zero, () => "briefing"),
       marks: [],
       status: laneStatusOf(briefing),
       result: briefing.some((s) => s.status === "RUNNING") ? "Writing the briefing" : "Briefing written, never decides",
+      said: written?.said ?? null,
+      facts,
     });
   }
   const waits = steps.filter((s) => kindOf(s) === "review");
@@ -570,7 +716,7 @@ function phase1(input: BackstageInput): PhaseTimeline {
   const running = exec?.status === "RUNNING" || (caseExists && !exec && (state === "RECEIVED" || state === "IN_PROGRESS"));
   const steps = exec?.steps ?? [];
   const nowOffset = zero !== null && caseExists ? Math.max(0, (now - zero) / 1000) : null;
-  const ctx = { trace, steps, zero, since: attemptStart };
+  const ctx: LaneContext = { trace, steps, zero, since: attemptStart, groups };
 
   const lanes: Lane[] = [];
   const queued = stageById(groups, "queued");
@@ -597,10 +743,10 @@ function phase1(input: BackstageInput): PhaseTimeline {
   lanes.push(sfnLane(exec, zero, "kyc90-phase1"));
 
   const specs: Array<AgentSpec & { stage: string }> = [
-    { key: "documents", states: ["Documents"], name: "Documents agent", tools: "s3_get_document → Textract", facts: ["documentExtraction"], stage: "doc-read" },
-    { key: "identity", states: ["Identity"], name: "Identity agent", tools: "rekognition_compare_faces", facts: ["faceMatch"], stage: "face-match" },
-    { key: "fraud", states: ["Fraud"], name: "Fraud agent", tools: "velocity_check", facts: ["velocity"], stage: "fraud" },
-    { key: "prescreen", states: ["PreScreen"], name: "Pre-Screen agent", tools: "sanctions_screen", facts: ["screening"], stage: "screening" },
+    { key: "documents", states: ["Documents"], facts: ["documentExtraction"], stage: "doc-read" },
+    { key: "identity", states: ["Identity"], facts: ["faceMatch"], stage: "face-match" },
+    { key: "fraud", states: ["Fraud"], facts: ["velocity"], stage: "fraud" },
+    { key: "prescreen", states: ["PreScreen"], facts: ["screening"], stage: "screening" },
   ];
   for (const spec of specs) {
     const stage = stageById(groups, spec.stage);
@@ -612,7 +758,8 @@ function phase1(input: BackstageInput): PhaseTimeline {
   const rules = stageById(groups, "rules-1");
   lanes.push(kindLane("rules", "Decision engine", "Lambda · rules, no model", "rules",
     steps.filter((s) => kindOf(s) === "rules"), zero, rules, () => "rules"));
-  lanes.push(...reviewLanes(steps, zero, stageById(groups, "review-1"), agentRun(trace, "phase1", "briefing")));
+  lanes.push(...reviewLanes(steps, zero, stageById(groups, "review-1"), agentRun(trace, "phase1", "briefing"),
+    briefingFor(trace, "phase1")));
   lanes.push(kindLane("seal", "Decision record", "Lambda → S3 Object Lock", "seal",
     steps.filter((s) => kindOf(s) === "seal"), zero, stageById(groups, "sealed-1"), () => "sealed"));
   lanes.push(kindLane("account", "Account platform", "Lambda · enforces the limits", "account",
@@ -664,6 +811,7 @@ function phase1(input: BackstageInput): PhaseTimeline {
         : null,
     executionName: executionName(exec),
     consoleUrl: consoleUrl(exec),
+    path: true,
   };
 }
 
@@ -678,7 +826,7 @@ function phase2(input: BackstageInput): PhaseTimeline {
   const running = exec?.status === "RUNNING";
   const steps = exec?.steps ?? [];
   const nowOffset = zero !== null ? Math.max(0, (now - zero) / 1000) : null;
-  const ctx = { trace, steps, zero, since: zero };
+  const ctx: LaneContext = { trace, steps, zero, since: zero, groups };
 
   const lanes: Lane[] = [sfnLane(exec, zero, "kyc90-phase2")];
 
@@ -686,9 +834,11 @@ function phase2(input: BackstageInput): PhaseTimeline {
   const notifyRun = agentRun(trace, "phase2", "notify");
   const notifySteps = steps.filter((s) => kindOf(s) === "notify");
   const messages: Mark[] = [];
-  for (const note of trace?.notifications ?? []) {
+  const phaseNotes = (trace?.notifications ?? []).filter(
+    (note) => offset(note.at, zero) !== null && !(zero !== null && (ms(note.at) ?? 0) < zero - 2000));
+  for (const note of phaseNotes) {
     const at = offset(note.at, zero);
-    if (at === null || (zero !== null && (ms(note.at) ?? 0) < zero - 2000)) continue;
+    if (at === null) continue;
     const why = guardReason(note.replacedBecause);
     messages.push({
       at,
@@ -698,31 +848,57 @@ function phase2(input: BackstageInput): PhaseTimeline {
         : "The message passed the guard as written",
     });
   }
+  // What the agent wrote, beside what the guard let through: the guard's work, on one row.
+  const lastNote = phaseNotes[phaseNotes.length - 1];
+  const notifyFacts: Array<[string, string]> = [
+    ["AgentCore harness", notifySteps.map((s) => s.target).find(Boolean) ?? "kyc90_notify"],
+    ...toolRows("notify"),
+  ];
+  if (notifyRun?.model) notifyFacts.push(["Model", notifyRun.model]);
+  if (lastNote) {
+    notifyFacts.push(["Said", lastNote.written.replace(/\s+/g, " ").trim() || "—"]);
+    notifyFacts.push(["The customer saw", lastNote.shown]);
+  }
   lanes.push({
     id: "notify",
-    name: "Notify agent",
-    sub: [modelName(notifyRun?.model), tokens(notifyRun?.totalTokens)].filter(Boolean).join(" · ") ||
-      "Message → tipping-off guard",
+    name: AGENTS.notify.name,
+    harness: "AgentCore harness",
+    sub: AGENTS.notify.tool,
     tone: "notify",
     segments: segmentsOf(notifySteps, zero, (s) => (s.name === "NotifyOutcome" ? "outcome message" : "first message")),
     marks: messages,
     status: notifyStage?.status ?? laneStatusOf(notifySteps),
     result: notifyStage?.short ?? null,
     stage: notifyStage,
+    said: lastNote?.written ? lastNote.written.replace(/\s+/g, " ").trim() || null : null,
+    facts: notifyFacts,
   });
 
   if (steps.some((s) => s.name === "ReScreen")) {
     const screening = stageById(groups, "screening");
+    const rescreen = steps.filter((s) => s.name === "ReScreen");
+    const running = rescreen.some((s) => s.status === "RUNNING");
+    // The result beside "Recorded" is what this re-screen wrote, never Phase 1's fact.
+    const recorded = factIn(trace?.facts?.screening ?? null, zero);
     lanes.push(agentLane(
-      { key: "prescreen", states: ["ReScreen"], name: "Pre-Screen agent", tools: "sanctions_screen", facts: ["screening"] },
-      "phase2", ctx, { stage: screening, status: laneStatusOf(steps.filter((s) => s.name === "ReScreen")), text: "Re-screened: the list changed since Phase 1" },
+      { key: "prescreen", states: ["ReScreen"], facts: ["screening"] },
+      "phase2", ctx,
+      {
+        stage: screening,
+        status: running || !recorded ? laneStatusOf(rescreen) : screening?.status ?? laneStatusOf(rescreen),
+        text: running
+          ? "Re-screening: the list changed since Phase 1"
+          : recorded
+            ? screening?.short ?? null
+            : "No new fact recorded by this re-screen",
+      },
     ));
   }
 
   const pep = stageById(groups, "pep");
   const media = stageById(groups, "media");
   lanes.push(agentLane(
-    { key: "compliance", states: ["ComplianceRisk"], name: "Compliance agent", tools: "pep_lookup, adverse_media", facts: ["pep", "adverseMedia"] },
+    { key: "compliance", states: ["ComplianceRisk"], facts: ["pep", "adverseMedia"] },
     "phase2", ctx,
     {
       stage: pep,
@@ -734,7 +910,8 @@ function phase2(input: BackstageInput): PhaseTimeline {
 
   lanes.push(kindLane("rules", "Decision engine", "Lambda · rules, no model", "rules",
     steps.filter((s) => kindOf(s) === "rules"), zero, stageById(groups, "rules-2"), () => "rules"));
-  lanes.push(...reviewLanes(steps, zero, stageById(groups, "review-2"), agentRun(trace, "phase2", "briefing")));
+  lanes.push(...reviewLanes(steps, zero, stageById(groups, "review-2"), agentRun(trace, "phase2", "briefing"),
+    briefingFor(trace, "phase2")));
   lanes.push(kindLane("seal", "Decision record", "Lambda → S3 Object Lock", "seal",
     steps.filter((s) => kindOf(s) === "seal"), zero, stageById(groups, "sealed-2"), () => "sealed"));
   lanes.push(kindLane("account", "Account platform", "Lambda · reads, then lifts", "account",
@@ -811,7 +988,7 @@ function phase3(input: BackstageInput): PhaseTimeline {
     };
   }
 
-  const ctx = { trace, steps, zero, since: zero };
+  const ctx: LaneContext = { trace, steps, zero, since: zero, groups };
   const monitor = stageById(groups, "monitor");
   const lanes: Lane[] = [
     {
@@ -826,14 +1003,15 @@ function phase3(input: BackstageInput): PhaseTimeline {
     },
     sfnLane(exec, zero, "kyc90-phase3-lifecycle"),
     agentLane(
-      { key: "prescreen", states: ["ReScreen"], name: "Pre-Screen agent", tools: "sanctions_screen", facts: ["screening"] },
+      { key: "prescreen", states: ["ReScreen"], facts: ["screening"] },
       "phase3", ctx, { stage: monitor, status: monitor?.status ?? "idle", text: stageById(groups, "screening")?.short ?? null },
     ),
     kindLane("rules", "Decision engine", "Lambda · rules, no model", "rules",
       steps.filter((s) => kindOf(s) === "rules"), zero, monitor, () => "rules"),
     kindLane("history", "Decision history", "DynamoDB · insert-only", "seal",
       steps.filter((s) => kindOf(s) === "history"), zero, undefined, () => "row"),
-    ...reviewLanes(steps, zero, stageById(groups, "review-3"), agentRun(trace, "phase3", "briefing")),
+    ...reviewLanes(steps, zero, stageById(groups, "review-3"), agentRun(trace, "phase3", "briefing"),
+      briefingFor(trace, "phase3")),
     kindLane("seal", "Decision record", "Lambda → S3 Object Lock", "seal",
       steps.filter((s) => kindOf(s) === "seal"), zero, undefined, () => "sealed"),
     kindLane("account", "Account platform", "Lambda · freezes at once", "account",
@@ -884,16 +1062,6 @@ const STATE_TONE: Record<string, FeedTone> = {
   FROZEN: "danger",
 };
 
-const AGENT_NAME: Record<string, string> = {
-  documents: "Documents agent",
-  identity: "Identity agent",
-  fraud: "Fraud agent",
-  prescreen: "Pre-Screen agent",
-  compliance: "Compliance agent",
-  notify: "Notify agent",
-  briefing: "Briefing agent",
-};
-
 function buildFeed(input: BackstageInput): FeedItem[] {
   const { trace, status, groups, attemptStart } = input;
   const items: FeedItem[] = [];
@@ -927,7 +1095,9 @@ function buildFeed(input: BackstageInput): FeedItem[] {
       const kind = kindOf(step);
       const ended = step.endedAt;
       const took = step.startedAt && ended ? duration(Math.max(0, ((ms(ended) ?? 0) - (ms(step.startedAt) ?? 0)) / 1000)) : null;
-      if (step.name === "Phase1Parallel") add(step.startedAt, "sfn", "Step Functions", "Four agents invoked at once, in one Parallel state");
+      if (step.name === "Phase1Parallel") {
+        add(step.startedAt, "sfn", "Step Functions", "Four AgentCore harnesses invoked at once, in one Parallel state");
+      }
       if (kind === "agent" || kind === "notify" || kind === "briefing") {
         const key = agentKeyOf(step) ?? "";
         const run = agentRun(trace, phase, key);
@@ -940,10 +1110,10 @@ function buildFeed(input: BackstageInput): FeedItem[] {
               : kind === "briefing"
                 ? "the reviewer decides without a briefing"
                 : "recorded as unavailable, so a person decides";
-          add(ended, kind === "notify" ? "notify" : "agent", AGENT_NAME[key] ?? step.name,
+          add(ended, kind === "notify" ? "notify" : "agent", AGENTS[key]?.name ?? step.name,
             step.status === "FAILED"
-              ? `Failed after ${took}: ${failure}`
-              : `Answered in ${took}${run?.totalTokens ? ` · ${tokens(run.totalTokens)}` : ""}${run?.model ? ` · ${modelName(run.model)}` : ""}`,
+              ? `Harness run failed after ${took}: ${failure}`
+              : `Harness answered in ${took}${run?.totalTokens ? ` · ${tokens(run.totalTokens)}` : ""}${run?.model ? ` · ${modelName(run.model)}` : ""}`,
             step.status === "FAILED" ? "danger" : "neutral");
         }
       } else if (kind === "rules" && ended) {
@@ -980,7 +1150,9 @@ function buildFeed(input: BackstageInput): FeedItem[] {
       // Phase 1's facts are this attempt's; a later phase's land after it.
       if (!fact || !at || (attemptStart !== null && (ms(at) ?? 0) < attemptStart - 2000)) continue;
       const stage = stageById(groups, FACT_STAGE[name]);
-      add(at, "tool", FACT_TOOL[name], stage?.short ? `Recorded: ${stage.short}` : "Recorded its fact on the case",
+      // Every tool is reached through the Gateway; the tool itself writes the fact to the case.
+      add(at, "tool", FACT_TOOL[name],
+        `Called through AgentCore Gateway · recorded${stage?.short ? `: ${stage.short}` : " its fact on the case"}`,
         fact.performed === false ? "warning" : "neutral");
     }
   }
@@ -1000,11 +1172,29 @@ function buildFeed(input: BackstageInput): FeedItem[] {
 
 // --------------------------------------------------------------------------------- the model
 
+function policyMode(value: string | null | undefined): Governance["policyMode"] {
+  const mode = (value ?? "").trim().toUpperCase();
+  return mode === "LOG_ONLY" || mode === "ENFORCE" ? mode : null;
+}
+
+/**
+ * The Cedar mode, as the case's own decision record pinned it (`<engine ARN>#<mode>`), else as the
+ * API reports the deployment's (D-40): a run in progress has no record yet. Neither, and the view
+ * names Cedar without claiming a mode.
+ */
+function governanceOf(trace: CaseTraceResponse | null): Governance {
+  const pinned = policyMode(trace?.decision?.versions?.policyEngineVersion?.split("#")[1]);
+  if (pinned) return { policyMode: pinned, policySource: "record" };
+  const deployed = policyMode(trace?.policyEnforcement);
+  return { policyMode: deployed, policySource: deployed ? "deployment" : null };
+}
+
 export function buildBackstage(input: BackstageInput): Backstage {
   return {
     available: input.available,
     phases: [phase1(input), phase2(input), phase3(input)],
     feed: buildFeed(input),
     now: input.now,
+    governance: governanceOf(input.trace),
   };
 }

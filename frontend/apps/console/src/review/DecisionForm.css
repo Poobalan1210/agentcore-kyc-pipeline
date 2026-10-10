@@ -62,6 +62,56 @@ textarea.kyc-decision-rationale {
   line-height: 1.6;
 }
 
+.kyc-briefing__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.kyc-briefing__summary {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.kyc-briefing__checks,
+.kyc-briefing__questions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kyc-briefing__checks li {
+  display: grid;
+  grid-template-columns: minmax(140px, max-content) minmax(0, 1fr);
+  gap: var(--space-3);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+.kyc-briefing__check {
+  font-weight: 650;
+  color: var(--color-text-secondary);
+}
+
+.kyc-briefing__subhead {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-tertiary);
+}
+
+.kyc-briefing__questions li {
+  padding-left: 14px;
+  border-left: 2px solid var(--color-warning-border);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
 .kyc-briefing__label {
   margin-top: var(--space-3);
   font-size: 12px;

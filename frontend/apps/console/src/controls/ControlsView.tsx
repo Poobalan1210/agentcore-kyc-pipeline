@@ -189,7 +189,15 @@ function ResetCard({ onReset }: { onReset: () => void }) {
     setNote(null);
     try {
       const result = await api.resetDemo();
-      setNote(`Faults and published list updates cleared. ${result.note}.`);
+      // D-41. An API from before the device and network counts sends neither field.
+      const cleared = result.velocityCleared;
+      const counts = result.velocityError
+        ? ` Device and network counts were not cleared (${result.velocityError}): reset again.`
+        : typeof cleared === "number"
+          ? ` Device and network counts cleared (${cleared} ${cleared === 1 ? "entry" : "entries"}).`
+          : "";
+      const note = result.note.charAt(0).toUpperCase() + result.note.slice(1);
+      setNote(`Faults and published list updates cleared.${counts} ${note}.`);
       onReset();
     } catch {
       setNote("Reset failed. Nothing was changed.");
@@ -205,8 +213,9 @@ function ResetCard({ onReset }: { onReset: () => void }) {
       </CardHeader>
       <CardBody>
         <p className="kyc-hint">
-          Before every run. Clears every fault and every published list update. It does not
-          unfreeze anything: only a reviewer does that.
+          Before every run. Clears every fault, every published list update and the device and
+          network counts the Fraud check reads. It does not unfreeze anything: nothing in this
+          build does.
         </p>
         <Button variant="secondary" onClick={reset} loading={busy}>
           Reset demo controls

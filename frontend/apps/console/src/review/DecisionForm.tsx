@@ -3,6 +3,7 @@ import { Badge } from "@shared/components/Badge";
 import { Button } from "@shared/components/Button";
 import { Card, CardBody, CardHeader } from "@shared/components/Card";
 import { api, ApiError, CaseTraceResponse, QueuedCaseSummary, ScreeningHit } from "@shared/api/client";
+import { readBriefing, readReply } from "../process/agentReply";
 import { CaseTrace } from "./CaseTrace";
 import {
   actionsFor,
@@ -142,10 +143,11 @@ export function DecisionForm({
           <h3 id="briefing-heading">Briefing</h3>
           {briefing?.text ? (
             <>
-              <p className="kyc-briefing__text">{briefing.text}</p>
+              <BriefingBody text={briefing.text} />
               <p className="kyc-briefing__label">
-                Written by the Briefing agent from the recorded facts. It explains the case; it
-                decided nothing. Check it against the facts below.
+                Written by the Briefing agent, an AgentCore harness with no tools, from the
+                recorded facts. It explains the case; it decided nothing. Check it against the
+                facts below.
               </p>
             </>
           ) : (
@@ -180,7 +182,7 @@ export function DecisionForm({
             ) : clearable.length > 0 ? (
               <p className="kyc-hint">
                 Approving clears {clearable.map((h) => `${h.entryId} (${h.classification})`)
-                  .join(", ")}. The clearance is recorded with your name and the list version
+                  .join(", ")}. The clearance is recorded with your reviewer ID and the list version
                 ({trace?.facts.screening?.listVersion ?? "—"}), and from then on the rules treat
                 that listing as cleared for this customer. A confirmed match is never cleared.
               </p>
@@ -219,7 +221,7 @@ export function DecisionForm({
             value={rationale}
             onChange={(event) => setRationale(event.target.value)}
             disabled={submitting}
-            placeholder="Why you decided this. Recorded in the audit trail with your name."
+            placeholder="Why you decided this. Sealed in the decision record with your reviewer ID."
           />
         </div>
 
@@ -234,5 +236,42 @@ export function DecisionForm({
         {trace ? <CaseTrace trace={trace} /> : null}
       </CardBody>
     </Card>
+  );
+}
+
+/**
+ * The briefing as a reviewer reads it: the summary, each check and its finding, and what is left
+ * to establish. The agent answers in those fields; printed as it arrives, a reviewer was handed a
+ * JSON object. A briefing written as prose is shown as the prose it is.
+ */
+function BriefingBody({ text }: { text: string }) {
+  const parts = readBriefing(text);
+  if (!parts) {
+    return <p className="kyc-briefing__text">{readReply(text)?.text ?? text}</p>;
+  }
+  return (
+    <div className="kyc-briefing__body">
+      {parts.summary ? <p className="kyc-briefing__summary">{parts.summary}</p> : null}
+      {parts.checks.length ? (
+        <ul className="kyc-briefing__checks">
+          {parts.checks.map((row, i) => (
+            <li key={`${row.check}-${i}`}>
+              {row.check ? <span className="kyc-briefing__check">{row.check}</span> : null}
+              <span>{row.finding}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {parts.openQuestions.length ? (
+        <>
+          <h4 className="kyc-briefing__subhead">To establish before deciding</h4>
+          <ul className="kyc-briefing__questions">
+            {parts.openQuestions.map((question, i) => (
+              <li key={i}>{question}</li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+    </div>
   );
 }

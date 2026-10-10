@@ -122,7 +122,7 @@ exist after stage 1 (Cedar forbids wildcard resources). `make deploy` runs both.
 | `KycIngress` | SQS FIFO queue and the Pipe that starts Phase 1 |
 | `KycLifecycle` | The lifecycle event bus, its archive, the Phase 3 state machine, the decision history table |
 | `KycAuth` | Cognito user pool (`reviewers`, `presenters`), identity pool for the liveness detector |
-| `KycApi` | HTTP API, JWT authorizer, and five Lambdas: liveness, intake, review, accounts, demo |
+| `KycApi` | HTTP API, JWT authorizer, five Lambdas (liveness, intake, review, accounts, demo), and the KMS HMAC key intake hashes the device and network with (D-41) |
 | Stage 2 (no stack) | Cedar policies, 9 per jurisdiction's engine (6 tool permits, a prompt-attack guardrail, 2 content filters), created by `policies/deploy_stage2.py` with boto3. CloudFormation's handler for this resource type failed the stage, so `KycPolicies` exists only for the tests and is never deployed. No PII suppression yet: no tool declares an output schema for it to scan (D-34) |
 
 ### 2.2 The agents and the tools
@@ -131,7 +131,7 @@ exist after stage 1 (Cedar forbids wildcard resources). `make deploy` runs both.
 |---|---|---|---|---|
 | Documents | 1 | Nova Lite | `s3_get_document` | `documentExtraction` — Textract text and the MRZ, check-digit verified |
 | Identity | 1 | Nova Lite | `rekognition_compare_faces` | `factFaceMatch` — match and a similarity band, never a raw score |
-| Fraud | 1 | Nova Lite | `velocity_check` | `factVelocity` — `NOT_ESTABLISHED` in this build: no device or IP is captured at intake |
+| Fraud | 1 | Nova Lite | `velocity_check` | `factVelocity` — how many different people applied from this device and this network in 24 h, from keyed hashes intake captures (D-41); `NOT_ESTABLISHED` when it could not capture them |
 | Pre-Screen | 1, 2, 3 | Nova Lite | `sanctions_screen` | `factScreening` — exact and variant matching, every alert classified, every exclusion reasoned |
 | Compliance | 2 | Nova 2 Lite (reasoning) | `pep_lookup`, `adverse_media` | `factPep`, `factAdverseMedia` |
 | Notify | 2 | Nova Micro | — | The customer message, checked by the tipping-off guard |
@@ -170,8 +170,8 @@ details filled in and never shows a persona.
 2. Open a case: the briefing, the screening alerts and what an approval would clear, then the
    recorded facts, each phase's decision, the agents' narrative, the execution timeline, the
    account as the platform holds it and every message the guard replaced, with why.
-3. Decide with a rationale. The decision, the reviewer's name and any cleared alerts are written
-   in one conditional write and sealed in the audit record.
+3. Decide with a rationale. The decision, the reviewer's ID, the rationale and any cleared alerts
+   are written in one conditional write and sealed in the audit record (D-42).
 
 ### 2.5 Presenter controls
 
@@ -179,7 +179,8 @@ All cases and Demo controls (`presenters` group) show every case with its measur
 decision, and drive the acts through the same runtime controls production code reads: faults (a
 tool reported unavailable, an agent given less time), a sanctions list update (a batch of four
 synthetic listings, one of which names a customer) that fans out one event per open account, and
-reset. These routes exist only when deployed with
+reset, which also clears the device and network counts the Fraud check reads (D-41). These routes
+exist only when deployed with
 `-c demoControls=true` (the default here) — **a presenter can freeze any open account**, so
 remove them with `-c demoControls=false` for anything but a demo.
 
@@ -189,7 +190,7 @@ One web app, one sign-in, one port (`frontend/apps/console`, http://localhost:51
 
 | View | Who | What it shows |
 |---|---|---|
-| Live demo | anyone signed in | The applicant's phone on the left, showing only the bank's app; *New application* opens it for a demo persona (or blank), and a note under the phone names that persona's ID. On the right, the case in two views of the same records. *Backstage* (reviewers; the default): each phase as a live timeline from its Step Functions execution history, one lane per service, the four agents side by side, each tool's fact where it landed, a feed of every write, and a link to the execution in the Step Functions console. *Story*: every stage as the case record records it, in plain words, with the time each landed. One tab per application, kept across a reload |
+| Live demo | anyone signed in | The applicant's phone on the left, showing only the bank's app; *New application* opens it for a demo persona (or blank), and a note under the phone names that persona's ID. On the right, the case in two views of the same records. *Backstage* (reviewers; the default): each phase as a live timeline from its Step Functions execution history, one lane per service, the four agents side by side, each labelled as its AgentCore harness, with what its tool recorded beside what the agent said (D-40), a feed of every write, and a link to the execution in the Step Functions console. *Story*: every stage as the case record records it, in plain words, with the time each landed. One tab per application, kept across a reload. *Large text* in the bar enlarges the process side for a room |
 | Review queue | `reviewers` | The queue, the briefing and alerts, the decision form, the full trace |
 | All cases | `presenters` | Every case, its state and time to decision; a row opens that case's process and record |
 | Demo controls | `presenters` | The Act 3 list update, faults, the stopwatch, reset |

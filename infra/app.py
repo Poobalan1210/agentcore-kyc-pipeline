@@ -269,10 +269,15 @@ api = ApiStack(
     phase2_state_machine_arn=orchestration.phase2.attr_arn,
     phase3_state_machine_arn=lifecycle.phase3.attr_arn,
     account_function_arn=tools.account_fn.function_arn,
+    # D-41: intake counts each application against its device and network here; Reset clears it.
+    velocity_table_name=tools.velocity_table.table_name,
+    velocity_table_arn=tools.velocity_table.table_arn,
     lifecycle_bus_arn=lifecycle.bus.event_bus_arn,
     lifecycle_bus_name=lifecycle.bus.event_bus_name,
     demo_controls=demo_controls,
     liveness_challenge=liveness_challenge,
+    # The same value the Gateways are attached in, so the console's live view reports it (D-40).
+    policy_enforcement=policy_enforcement,
     description=(
         "HTTP API behind a Cognito JWT authorizer: liveness, intake, case status, accounts, "
         "the reviewer console" + (", presenter demo controls." if demo_controls else ".")

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@shared/components/Button";
 import { Icon } from "../console/icons";
 import { AppScreen, StepHeader } from "./AppShell";
-import { DOCUMENT_TYPE_COPY, PRODUCT_COPY, REVIEW_COPY } from "./copy";
+import { DOCUMENT_TYPE_COPY, PRODUCT_COPY, REVIEW_COPY, STEP_UP_COPY } from "./copy";
 import { countryName, iso2For } from "./countries";
 import { DeclaredIdentity, DocumentDraft, IntakeSelection } from "./types";
 
@@ -10,11 +10,15 @@ import { DeclaredIdentity, DocumentDraft, IntakeSelection } from "./types";
  * One look at everything the application carries before it is sent, with a way to change each
  * part: the declared details, the ID document and the selfie video. Nothing reaches the bank
  * until Submit, which is the moment the four agents start (D-37).
+ *
+ * The selfie row says what the face check found. A failed one is shown as failed, with the
+ * redo first; Submit stays available, because a failed check never locks anyone out (R30.2).
  */
 export function ReviewStep({
   identity,
   selection,
   documents,
+  liveness,
   onEditDetails,
   onRetakeDocument,
   onRedoSelfie,
@@ -23,6 +27,8 @@ export function ReviewStep({
   identity: DeclaredIdentity;
   selection: IntakeSelection;
   documents: DocumentDraft[];
+  /** The face check's result: true live, false not confirmed, null not known here. */
+  liveness: boolean | null;
   onEditDetails: () => void;
   onRetakeDocument: () => void;
   onRedoSelfie: () => void;
@@ -30,6 +36,7 @@ export function ReviewStep({
 }) {
   const document = documents[0];
   const [thumb, setThumb] = useState<string | null>(null);
+  const livenessFailed = liveness === false;
 
   useEffect(() => {
     if (!document || !document.file.type.startsWith("image/")) {
@@ -49,7 +56,16 @@ export function ReviewStep({
       footer={
         <>
           <p className="app-fine">{REVIEW_COPY.declaration}</p>
-          <Button variant="primary" className="app-cta" onClick={onSubmit}>
+          {livenessFailed ? (
+            <Button variant="primary" className="app-cta" onClick={onRedoSelfie}>
+              {STEP_UP_COPY.redoLiveness}
+            </Button>
+          ) : null}
+          <Button
+            variant={livenessFailed ? "secondary" : "primary"}
+            className="app-cta"
+            onClick={onSubmit}
+          >
             {REVIEW_COPY.submit}
           </Button>
         </>
@@ -113,11 +129,23 @@ export function ReviewStep({
             {REVIEW_COPY.redo}
           </button>
         </div>
-        <div className="app-item">
-          <span className="app-item__icon">
-            <Icon name="check" size={20} />
+        <div className="app-item" role={livenessFailed ? "alert" : undefined}>
+          <span
+            className={
+              "app-item__icon" +
+              (livenessFailed ? " app-item__icon--warn" : liveness === null ? " app-item__icon--idle" : "")
+            }
+          >
+            <Icon name={livenessFailed ? "alert" : liveness === null ? "face" : "check"} size={20} />
           </span>
-          <span className="app-item__text">{REVIEW_COPY.selfieDone}</span>
+          <span className="app-item__text">
+            {livenessFailed
+              ? REVIEW_COPY.selfieFailed
+              : liveness === null
+                ? REVIEW_COPY.selfieOnFile
+                : REVIEW_COPY.selfieDone}
+            {livenessFailed ? <small>{REVIEW_COPY.selfieFailedHint}</small> : null}
+          </span>
         </div>
       </section>
 

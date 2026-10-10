@@ -650,6 +650,17 @@
   color: var(--color-success);
 }
 
+/* A face check that did not confirm a live person: never shown with the success colours. */
+.app-item__icon--warn {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.app-item__icon--idle {
+  background: var(--color-neutral-bg);
+  color: var(--color-text-secondary);
+}
+
 .app-item__text {
   flex: 1;
   display: flex;

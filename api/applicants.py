@@ -19,6 +19,7 @@ from typing import Any, Mapping
 
 import auth
 import notifications
+import velocity
 
 LOG = logging.getLogger(__name__)
 if not LOG.handlers:
@@ -188,7 +189,8 @@ def create_applicant(event: Mapping[str, Any], _context: Any = None) -> dict[str
     ddb = boto3.client("dynamodb")
     table = os.environ["CASE_TABLE_NAME"]
     key = {"applicantId": {"S": applicant_id}, "sk": {"S": "CASE"}}
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    moment = datetime.now(timezone.utc)
+    now = moment.isoformat().replace("+00:00", "Z")
     event_id = f"EVT-{uuid.uuid4().hex[:12].upper()}"
     documents_attr = {"L": [
         {"M": {
@@ -199,6 +201,27 @@ def create_applicant(event: Mapping[str, Any], _context: Any = None) -> dict[str
         }} for d in documents
     ]}
     declared = _declared_identity_attr(body.get("declaredIdentity"))
+    # D-41. The device and network this application came from, as keyed hashes, for the Fraud
+    # agent's velocity tool. None when either is missing or capture failed: velocity is then
+    # NOT_ESTABLISHED for this case, and the application goes ahead regardless.
+    intake = velocity.capture(boto3, event, device_id=body.get("deviceId"),
+                              declared=body.get("declaredIdentity"), applicant_id=applicant_id,
+                              now=moment)
+
+    values: dict[str, Any] = {
+        ":declaredIdentity": declared,
+        ":caseId": {"S": f"CASE-{applicant_id}"},
+        ":state": {"S": "RECEIVED"},
+        ":createdAt": {"S": now},
+        ":jurisdiction": {"S": jurisdiction},
+        ":productApplied": {"S": str(body.get("productApplied") or "current_account")},
+        ":documents": documents_attr,
+        ":eventId": {"S": event_id},
+        ":empty": {"L": []},
+        ":tr": _transition("NONE", "RECEIVED", now, "application submitted", event),
+    }
+    if intake is not None:
+        values[":intake"] = intake
 
     # `update_item`, not `put_item`, and the guard is on `caseId` rather than `applicantId`: the
     # liveness result is written to this item *before* this endpoint runs (F-40's three-minute
@@ -213,20 +236,10 @@ def create_applicant(event: Mapping[str, Any], _context: Any = None) -> dict[str
                 "jurisdiction = :jurisdiction, productApplied = :productApplied, "
                 "documents = :documents, declaredIdentity = :declaredIdentity, "
                 "lastEventId = :eventId, "
-                "transitions = list_append(if_not_exists(transitions, :empty), :tr)"),
+                + ("intake = :intake, " if intake is not None else "")
+                + "transitions = list_append(if_not_exists(transitions, :empty), :tr)"),
             ExpressionAttributeNames={"#state": "state"},
-            ExpressionAttributeValues={
-                ":declaredIdentity": declared,
-                ":caseId": {"S": f"CASE-{applicant_id}"},
-                ":state": {"S": "RECEIVED"},
-                ":createdAt": {"S": now},
-                ":jurisdiction": {"S": jurisdiction},
-                ":productApplied": {"S": str(body.get("productApplied") or "current_account")},
-                ":documents": documents_attr,
-                ":eventId": {"S": event_id},
-                ":empty": {"L": []},
-                ":tr": _transition("NONE", "RECEIVED", now, "application submitted", event),
-            },
+            ExpressionAttributeValues=values,
             ConditionExpression="attribute_not_exists(caseId)",
         )
     except Exception as exc:  # noqa: BLE001 - narrowed immediately by error code
@@ -234,7 +247,7 @@ def create_applicant(event: Mapping[str, Any], _context: Any = None) -> dict[str
             raise
         resubmitted = _continue_case(ddb, table=table, key=key, applicant_id=applicant_id,
                                      event_id=event_id, documents=documents_attr,
-                                     declared=declared, now=now, event=event)
+                                     declared=declared, now=now, event=event, intake=intake)
         if resubmitted is not None:
             return resubmitted
 
@@ -245,13 +258,17 @@ def create_applicant(event: Mapping[str, Any], _context: Any = None) -> dict[str
 
 def _continue_case(ddb: Any, *, table: str, key: Mapping[str, Any], applicant_id: str,
                    event_id: str, documents: Mapping[str, Any], declared: Mapping[str, Any],
-                   now: str, event: Mapping[str, Any]) -> dict[str, Any] | None:
+                   now: str, event: Mapping[str, Any],
+                   intake: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
     """Resubmission after a step-up. Returns a response to send, or None to go on and enqueue.
 
     The previous attempt is kept, not overwritten: its decision, any review of it and the identity
     it was decided on move into `phase1History`, so a reviewer of the new attempt can see the old
     one, including a changed name or date of birth. The review slot is cleared because a new
     attempt can be reviewed afresh; first-writer-wins applies per attempt.
+
+    `intake` is this attempt's device and network, when captured; without it the case keeps the
+    ones the first submission recorded.
     """
     current = ddb.get_item(TableName=table, Key=key, ConsistentRead=True).get("Item") or {}
     state = _s(current.get("state")) or "UNKNOWN"
@@ -267,6 +284,19 @@ def _continue_case(ddb: Any, *, table: str, key: Mapping[str, Any], applicant_id
         "eventId": current.get("lastEventId") or {"NULL": True},
         "closedAt": {"S": now},
     }}
+    values: dict[str, Any] = {
+        ":received": {"S": "RECEIVED"},
+        ":awaiting": {"S": state},
+        ":documents": documents,
+        ":declaredIdentity": declared,
+        ":eventId": {"S": event_id},
+        ":now": {"S": now},
+        ":empty": {"L": []},
+        ":previous": {"L": [previous]},
+        ":tr": _transition(state, "RECEIVED", now, "resubmitted after a step-up", event),
+    }
+    if intake is not None:
+        values[":intake"] = intake
     try:
         ddb.update_item(
             TableName=table,
@@ -275,21 +305,12 @@ def _continue_case(ddb: Any, *, table: str, key: Mapping[str, Any], applicant_id
                 "SET #state = :received, documents = :documents, "
                 "declaredIdentity = :declaredIdentity, lastEventId = :eventId, "
                 "resubmittedAt = :now, "
-                "phase1History = list_append(if_not_exists(phase1History, :empty), :previous), "
+                + ("intake = :intake, " if intake is not None else "")
+                + "phase1History = list_append(if_not_exists(phase1History, :empty), :previous), "
                 "transitions = list_append(if_not_exists(transitions, :empty), :tr) "
                 "REMOVE phase1, phase1Review, reviewTaskToken, reviewTaskTokenAt"),
             ExpressionAttributeNames={"#state": "state"},
-            ExpressionAttributeValues={
-                ":received": {"S": "RECEIVED"},
-                ":awaiting": {"S": state},
-                ":documents": documents,
-                ":declaredIdentity": declared,
-                ":eventId": {"S": event_id},
-                ":now": {"S": now},
-                ":empty": {"L": []},
-                ":previous": {"L": [previous]},
-                ":tr": _transition(state, "RECEIVED", now, "resubmitted after a step-up", event),
-            },
+            ExpressionAttributeValues=values,
             # The state read above must still hold: two resubmissions racing each other must not
             # both enqueue.
             ConditionExpression="#state = :awaiting",

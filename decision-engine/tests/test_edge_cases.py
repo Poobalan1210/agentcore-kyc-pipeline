@@ -203,7 +203,9 @@ class TestR30Process:
         assert v.requirement == "R30.2"
         assert v.outcome is Phase1Outcome.MANUAL_REVIEW
         assert v.signals["permanent_lockout"] is False
-        assert v.signals["alternative_path_offered"] is True
+        assert v.signals["routed_to_reviewer"] is True
+        # Nothing offers the applicant another route, so the record must not say one was.
+        assert v.signals["alternative_path_offered"] is False
 
     def test_two_liveness_failures_do_not_fire(self):
         assert evaluate_edge_cases(EdgeFacts(liveness_failure_count=2)) == ()
