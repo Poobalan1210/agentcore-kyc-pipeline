@@ -532,6 +532,27 @@ class TestGetTrace:
         assert "referenceImageKey" not in body["applicant"]["liveness"]
         assert "auditImageKeys" not in body["applicant"]["liveness"]
 
+    def test_the_taxpayer_id_is_shown_by_its_last_four_digits_only(self, monkeypatch):
+        """The number has its own item (`applicants.TIN_SORT_KEY`); the trace asks it for the last
+        four digits alone, so the whole number cannot reach the console even by mistake."""
+        tin = {"applicantId": {"S": "APP-1"}, "sk": {"S": "TIN"}, "last4": {"S": "4320"}}
+
+        class TinDynamo(FakeDynamo):
+            def get_item(self, **kwargs):
+                self.get_item_calls.append(kwargs)
+                return {"Item": tin if kwargs["Key"]["sk"]["S"] == "TIN" else CASE_ITEM}
+
+        fake_ddb = TinDynamo()
+        monkeypatch.setitem(
+            sys.modules, "boto3", FakeBoto3Module(ddb=fake_ddb, s3=FakeS3()))
+        monkeypatch.setenv("CASE_TABLE_NAME", "kyc90-cases")
+        event = dict(REVIEWER_EVENT_CONTEXT)
+        event["pathParameters"] = {"caseId": "CASE-APP-1"}
+        body = json.loads(review_api.get_trace(event)["body"])
+        assert body["applicant"]["taxIdLast4"] == "4320"
+        tin_read = next(c for c in fake_ddb.get_item_calls if c["Key"]["sk"]["S"] == "TIN")
+        assert tin_read["ProjectionExpression"] == "last4"
+
     def _trace(self, monkeypatch, item=None, **clients):
         clients.setdefault("s3", FakeS3())
         monkeypatch.setitem(sys.modules, "boto3",

@@ -4,6 +4,7 @@ import { AppScreen, StepHeader } from "./AppShell";
 import { DETAILS_COPY } from "./copy";
 import { COUNTRIES } from "./countries";
 import { BLANK_IDENTITY } from "./demoPersonas";
+import { taxIdKind, taxIdRequired } from "./taxId";
 import { DeclaredIdentity } from "./types";
 
 /**
@@ -20,10 +21,13 @@ import { DeclaredIdentity } from "./types";
  * how the mismatch-detection path gets demonstrated.
  */
 export function DetailsStep({
+  jurisdiction,
   initial,
   onBack,
   onContinue,
 }: {
+  /** Where the applicant lives: the U.S. entity asks for an SSN or ITIN (CIP). */
+  jurisdiction: string;
   /** The presenter's persona, or what was declared before coming back to this screen. */
   initial?: DeclaredIdentity | null;
   onBack: () => void;
@@ -48,15 +52,27 @@ export function DetailsStep({
         ["dateOfBirth", DETAILS_COPY.dateOfBirth],
         ["nationality", DETAILS_COPY.nationality],
       ] as Array<[keyof DeclaredIdentity, string]>
-    ).filter(([field]) => !identity[field].trim());
+    ).filter(([field]) => !(identity[field] ?? "").trim());
+
+    const taxId = (identity.taxId ?? "").trim();
+    if (!taxId && taxIdRequired(jurisdiction, identity.nationality)) {
+      missing.push(["taxId", DETAILS_COPY.taxId]);
+    }
 
     if (missing.length > 0) {
       setError(`${DETAILS_COPY.missing} ${missing.map(([, label]) => label.toLowerCase()).join(", ")}.`);
       return;
     }
+    // The one plausibility check on this form, because the number is not compared with anything
+    // downstream: a typo would otherwise be refused by the API only on Submit.
+    if (taxId && !taxIdKind(taxId)) {
+      setError(DETAILS_COPY.taxIdInvalid);
+      return;
+    }
     setError(null);
     onContinue({
       ...identity,
+      taxId: jurisdiction === "us" && taxId ? taxId : undefined,
       // Normalised the way the document's machine-readable zone carries them, so the comparison
       // downstream is not just a case-sensitivity test.
       givenNames: identity.givenNames.trim().toUpperCase(),
@@ -126,6 +142,22 @@ export function DetailsStep({
           autoComplete="street-address"
         />
       </label>
+      {jurisdiction === "us" ? (
+        <label className="app-field">
+          <span>
+            {taxIdRequired(jurisdiction, identity.nationality)
+              ? DETAILS_COPY.taxId
+              : DETAILS_COPY.taxIdOptional}
+          </span>
+          <input
+            value={identity.taxId ?? ""}
+            onChange={(e) => update("taxId", e.target.value)}
+            inputMode="numeric"
+            autoComplete="off"
+            placeholder="XXX-XX-XXXX"
+          />
+        </label>
+      ) : null}
 
       {error ? <p className="app-error" role="alert">{error}</p> : null}
     </AppScreen>

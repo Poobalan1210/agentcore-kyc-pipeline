@@ -547,3 +547,23 @@ with a tick.
 **Rejected:** carrying the rationale in the resume payload (it would sit in execution history for
 90 days); sending a notification (a compliance referral with OFAC and SAR deadlines is a feature,
 not a wording fix); disabling Submit after a failed check (R30.2: no lockout).
+
+## D-43 — A U.S. applicant gives an SSN or ITIN, and is told why first
+**Decided:** two CIP items (31 CFR 1020.220) the build lacked. The Welcome screen shows, for the
+U.S. entity, notice that federal law requires the bank to get, verify and record identifying
+information, before anything is collected (§ (a)(5)). The details form asks for an SSN or ITIN,
+required of a U.S. national applying to the U.S. entity (§ (a)(2)(i)(A)(4)); a foreign national
+may rely on the passport already on the case. Intake checks the format (`applicants._tax_id`,
+mirrored in the console's `taxId.ts`) and stores the number on its own item (`sk = "TIN"`), never
+on the case. Screens show its last four digits. The browser never saves it, so a step-up
+resubmitted from a reloaded tab goes without it and the number on file stands. The demo personas
+use 987-65-4320 to 987-65-4329, which SSA reserves for advertisements and never issues.
+**Why:** a banker would ask where the SSN is, and the rule requires both. The case item is read
+whole by the state machines, so anything on it sits in execution history for 90 days and on
+Backstage; nothing in the pipeline needs the number.
+**Rejected:** the regulation's sample notice word for word (it names what the law is for, in
+words the tipping-off guard refuses in anything a customer reads, and the notice is adequate
+without them); a `ProjectionExpression` on every case read instead of a separate item (four
+state machines and every future read would have to remember it); verifying the number with SSA's
+eCBSV (a real service needing enrolment and the applicant's consent; the build checks format
+only, and says so).

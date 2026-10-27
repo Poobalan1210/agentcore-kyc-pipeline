@@ -166,6 +166,13 @@ def get_trace(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]:
     ).get("Item")
     if not item:
         return _response(404, {"error": "CASE_NOT_FOUND"})
+    # The taxpayer id's own item (`applicants.TIN_SORT_KEY`), and only its last four digits: the
+    # whole number is never read back out of the table by anything that shows it.
+    tin = ddb.get_item(
+        TableName=os.environ["CASE_TABLE_NAME"],
+        Key={"applicantId": {"S": applicant_id}, "sk": {"S": "TIN"}},
+        ProjectionExpression="last4",
+    ).get("Item")
 
     applicant = {
         "applicantId": applicant_id,
@@ -177,6 +184,7 @@ def get_trace(event: Mapping[str, Any], _context: Any = None) -> dict[str, Any]:
         "createdAt": _s(item.get("createdAt")),
         "documents": _document_summaries(item.get("documents")),
         "declaredIdentity": _declared_identity(item.get("declaredIdentity")),
+        "taxIdLast4": _s((tin or {}).get("last4")),
         "liveness": _liveness_summary(item.get("liveness")),
         "livenessFailures": _n(item.get("livenessFailures")),
         "previousAttempts": len((item.get("phase1History") or {}).get("L") or []),

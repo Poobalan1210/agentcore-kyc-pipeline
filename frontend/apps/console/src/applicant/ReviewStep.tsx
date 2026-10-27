@@ -4,6 +4,7 @@ import { Icon } from "../console/icons";
 import { AppScreen, StepHeader } from "./AppShell";
 import { DOCUMENT_TYPE_COPY, PRODUCT_COPY, REVIEW_COPY, STEP_UP_COPY } from "./copy";
 import { countryName, iso2For } from "./countries";
+import { maskTaxId } from "./taxId";
 import { DeclaredIdentity, DocumentDraft, IntakeSelection } from "./types";
 
 /**
@@ -95,6 +96,12 @@ export function ReviewStep({
             <div>
               <dt>{REVIEW_COPY.address}</dt>
               <dd>{identity.address}</dd>
+            </div>
+          ) : null}
+          {identity.taxId ? (
+            <div>
+              <dt>{REVIEW_COPY.taxId}</dt>
+              <dd>{maskTaxId(identity.taxId)}</dd>
             </div>
           ) : null}
         </dl>

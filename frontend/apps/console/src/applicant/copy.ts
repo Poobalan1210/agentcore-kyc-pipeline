@@ -33,6 +33,16 @@ export const WELCOME_COPY = {
   needDocument: "A passport, driver's license or national ID card",
   needCamera: "A camera, for a photo of your ID and a selfie video",
   needTime: "About three minutes",
+  needTaxId: "Your Social Security number or ITIN",
+  // CIP (31 CFR 1020.220(a)(5)): notice, before the account is opened, that the bank asks for
+  // this to verify identity. The regulation's sample wording also names what the law is for; that
+  // sentence is left out because the tipping-off guard (rightly) refuses its words in anything a
+  // customer reads, and the notice is adequate without it.
+  cipHeading: "Important information about opening an account",
+  cipNotice:
+    "Federal law requires us to get, verify and record information that identifies each " +
+    "person who opens an account. We'll ask for your name, address, date of birth and Social " +
+    "Security number or ITIN, and we'll check your ID.",
   countryLabel: "Where do you live?",
   productLabel: "Choose an account",
   consent:
@@ -62,6 +72,9 @@ export const DETAILS_COPY = {
   dateOfBirth: "Date of birth",
   nationality: "Nationality",
   address: "Home address",
+  taxId: "Social Security number or ITIN",
+  taxIdOptional: "Social Security number or ITIN, if you have one",
+  taxIdInvalid: "That doesn't look like a Social Security number or ITIN. Check the nine digits.",
   missing: "Please add your",
   continue: "Continue",
 };
@@ -132,6 +145,7 @@ export const REVIEW_COPY = {
   dob: "Date of birth",
   nationality: "Nationality",
   address: "Home address",
+  taxId: "SSN or ITIN",
   idDocument: "ID document",
   selfie: "Selfie video",
   selfieDone: "Live person confirmed",

@@ -54,6 +54,11 @@ export function IntakeStep({
         <li>
           <Icon name="face" size={19} /> {WELCOME_COPY.needCamera}
         </li>
+        {jurisdiction === "us" ? (
+          <li>
+            <Icon name="person" size={19} /> {WELCOME_COPY.needTaxId}
+          </li>
+        ) : null}
         <li>
           <Icon name="clock" size={19} /> {WELCOME_COPY.needTime}
         </li>
@@ -94,6 +99,13 @@ export function IntakeStep({
           </button>
         ))}
       </div>
+
+      {/* Shown, not behind a toggle: the rule asks for notice before the account is opened. */}
+      {jurisdiction === "us" ? (
+        <p className="app-fine">
+          <strong>{WELCOME_COPY.cipHeading}.</strong> {WELCOME_COPY.cipNotice}
+        </p>
+      ) : null}
 
       <label className="app-consent">
         <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />

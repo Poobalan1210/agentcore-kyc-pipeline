@@ -148,8 +148,10 @@ The presenter picks the demo persona beside it, from *New application*, so the a
 details filled in and never shows a persona.
 
 1. Welcome: where the applicant lives, which account, and consent to the face check, with the
-   notice on what happens to the video.
-2. About you: the declared identity.
+   notice on what happens to the video and, for the U.S. entity, the notice that the bank must
+   verify identity (D-43).
+2. About you: the declared identity and, for a U.S. national, an SSN or ITIN, kept apart from
+   the case and shown only by its last four digits (D-43).
 3. ID document: photographed with the webcam on a full-window stage and cropped to the guide, or
    uploaded. It goes to the evidence bucket now, before the selfie.
 4. Selfie video: the face check fills the window, centred under the webcam, and starts by itself

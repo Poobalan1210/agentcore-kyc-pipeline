@@ -233,6 +233,7 @@ class TestCreateApplicant:
                 "givenNames": "TAYLOR JORDAN", "surname": "REEVES",
                 "dateOfBirth": "1991-05-14", "nationality": "USA",
                 "address": "482 Kestrel Way, Austin, TX 78701, USA",
+                "taxId": "987-65-4320",
             },
             "documents": [{"type": "PASSPORT", "key": "APP-1/PASSPORT-abc",
                            "bucket": "kyc90-evidence-us"}]})}
@@ -530,6 +531,106 @@ class TestContinuation:
                             FakeBoto3Module(sqs=fake_sqs, ddb=StatefulDynamo()))
         body = json.loads(applicants.create_applicant(submission())["body"])
         assert fake_sqs.sent[0]["MessageDeduplicationId"] == body["eventId"]
+
+
+class TinAwareDynamo(StatefulDynamo):
+    """The case item as `StatefulDynamo` keeps it, plus the taxpayer id's own item."""
+
+    def __init__(self, item=None, tin=None):
+        super().__init__(item)
+        self.tin = tin
+        self.get_keys: list[str] = []
+
+    def get_item(self, **kwargs):
+        sk = kwargs["Key"]["sk"]["S"]
+        self.get_keys.append(sk)
+        if sk == applicants.TIN_SORT_KEY:
+            return {"Item": dict(self.tin)} if self.tin else {}
+        return super().get_item(**kwargs)
+
+    def update_item(self, **kwargs):
+        if kwargs["Key"]["sk"]["S"] != applicants.TIN_SORT_KEY:
+            return super().update_item(**kwargs)
+        self.update_calls.append(kwargs)
+        self.tin = dict(kwargs["ExpressionAttributeValues"])
+        return {}
+
+
+US_NATIONAL = {"givenNames": "TAYLOR JORDAN", "surname": "REEVES", "dateOfBirth": "1991-05-14",
+               "nationality": "USA", "address": "482 Kestrel Way, Austin, TX 78701, USA"}
+
+
+class TestTaxId:
+    """CIP: a U.S. person gives a taxpayer id, and it never travels with the case."""
+
+    # The same cases as `frontend/apps/console/src/applicant/taxId.test.ts`: the form's check
+    # and this one must agree, or a number the form accepts is refused on Submit.
+    @pytest.mark.parametrize("raw,kind", [("123-45-6789", "SSN"), ("123456789", "SSN"),
+                                          ("987-65-4320", "ITIN"), ("912-70-1234", "ITIN")])
+    def test_well_formed_numbers_are_accepted(self, raw, kind):
+        assert applicants._tax_id(raw) == (kind, raw.replace("-", ""))
+
+    @pytest.mark.parametrize("raw", ["000-12-3456", "666-12-3456", "123-00-4567", "123-45-0000",
+                                     "912-93-1234", "12345678", "12345678a"])
+    def test_malformed_numbers_are_refused(self, raw):
+        assert applicants._tax_id(raw) is None
+
+    def _run(self, monkeypatch, ddb, declared):
+        fake_sqs = FakeSqs()
+        monkeypatch.setitem(__import__("sys").modules, "boto3",
+                            FakeBoto3Module(sqs=fake_sqs, ddb=ddb))
+        return applicants.create_applicant(submission(declaredIdentity=declared)), fake_sqs
+
+    def test_a_us_national_without_one_is_refused_before_anything_is_written(
+            self, env, monkeypatch):
+        ddb = TinAwareDynamo()
+        resp, sqs = self._run(monkeypatch, ddb, US_NATIONAL)
+        assert resp["statusCode"] == 400
+        assert json.loads(resp["body"])["error"] == "TAX_ID_REQUIRED"
+        assert not ddb.update_calls and not sqs.sent
+
+    def test_a_malformed_one_is_refused_without_reading_the_table(self, env, monkeypatch):
+        ddb = TinAwareDynamo()
+        resp, sqs = self._run(monkeypatch, ddb, {**US_NATIONAL, "taxId": "666-12-3456"})
+        assert resp["statusCode"] == 400
+        assert json.loads(resp["body"])["error"] == "INVALID_TAX_ID"
+        assert not ddb.get_keys and not ddb.update_calls and not sqs.sent
+
+    def test_it_is_stored_on_its_own_item_and_never_on_the_case(self, env, monkeypatch):
+        """The state machines read the whole case item into execution history (90 days, shown on
+        Backstage); the number must not be on it."""
+        ddb = TinAwareDynamo()
+        resp, _ = self._run(monkeypatch, ddb, {**US_NATIONAL, "taxId": "987-65-4320"})
+        assert resp["statusCode"] == 202
+        case_write = ddb.update_calls[0]
+        assert case_write["Key"]["sk"] == {"S": "CASE"}
+        assert "987654320" not in json.dumps(case_write)
+        assert "taxId" not in case_write["ExpressionAttributeValues"][":declaredIdentity"]["M"]
+        assert ddb.tin == {":taxId": {"S": "987654320"}, ":kind": {"S": "ITIN"},
+                           ":last4": {"S": "4320"}, ":at": ddb.tin[":at"]}
+
+    def test_a_foreign_national_may_rely_on_their_passport(self, env, monkeypatch):
+        ddb = TinAwareDynamo()
+        resp, _ = self._run(monkeypatch, ddb, {**US_NATIONAL, "nationality": "GBR"})
+        assert resp["statusCode"] == 202
+        assert ddb.tin is None
+
+    def test_a_step_up_without_the_number_keeps_the_one_on_file(self, env, monkeypatch):
+        """A reloaded tab resubmits what the browser kept, and the browser never keeps it."""
+        on_file = {"last4": {"S": "4320"}}
+        ddb = TinAwareDynamo(TestContinuation()._awaiting(), tin=on_file)
+        resp, sqs = self._run(monkeypatch, ddb, US_NATIONAL)
+        assert resp["statusCode"] == 202 and sqs.sent
+        assert ddb.tin == on_file
+
+    def test_a_refused_submission_never_replaces_the_number_on_file(self, env, monkeypatch):
+        item = TestContinuation()._awaiting()
+        item["state"] = {"S": "DECIDED"}
+        on_file = {"last4": {"S": "4320"}}
+        ddb = TinAwareDynamo(item, tin=on_file)
+        resp, _ = self._run(monkeypatch, ddb, {**US_NATIONAL, "taxId": "123-45-6789"})
+        assert resp["statusCode"] == 409
+        assert ddb.tin == on_file
 
 
 class TestGetCase:

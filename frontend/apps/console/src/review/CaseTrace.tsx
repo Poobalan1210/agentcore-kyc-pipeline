@@ -567,6 +567,10 @@ function ApplicantTab({ trace }: { trace: CaseTraceResponse }) {
           }
         />
         <FactRow
+          label="SSN or ITIN"
+          value={applicant.taxIdLast4 ? `on file, ending ${applicant.taxIdLast4}` : "not provided"}
+        />
+        <FactRow
           label="Documents"
           value={
             applicant.documents.length > 0

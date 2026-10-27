@@ -183,12 +183,26 @@ def create_applicant(event: Mapping[str, Any], _context: Any = None) -> dict[str
                 or not str(document.get("key") or "").startswith(f"{applicant_id}/")):
             return _response(403, {"error": "DOCUMENT_NOT_OWNED"})
 
+    declared_body = body.get("declaredIdentity")
+    declared_body = declared_body if isinstance(declared_body, Mapping) else {}
+    raw_tax_id = str(declared_body.get("taxId") or "").strip()
+    tax_id = _tax_id(raw_tax_id) if raw_tax_id else None
+    if raw_tax_id and tax_id is None:
+        return _response(400, {"error": "INVALID_TAX_ID"})
+
     import boto3
     from datetime import datetime, timezone
 
     ddb = boto3.client("dynamodb")
     table = os.environ["CASE_TABLE_NAME"]
     key = {"applicantId": {"S": applicant_id}, "sk": {"S": "CASE"}}
+    tin_key = {"applicantId": {"S": applicant_id}, "sk": {"S": TIN_SORT_KEY}}
+    # A step-up resubmits from what the browser kept, and the browser never keeps the number: one
+    # already on file stands.
+    if (tax_id is None and _tax_id_required(jurisdiction, declared_body)
+            and "Item" not in ddb.get_item(TableName=table, Key=tin_key,
+                                           ProjectionExpression="applicantId")):
+        return _response(400, {"error": "TAX_ID_REQUIRED"})
     moment = datetime.now(timezone.utc)
     now = moment.isoformat().replace("+00:00", "Z")
     event_id = f"EVT-{uuid.uuid4().hex[:12].upper()}"
@@ -250,6 +264,17 @@ def create_applicant(event: Mapping[str, Any], _context: Any = None) -> dict[str
                                      declared=declared, now=now, event=event, intake=intake)
         if resubmitted is not None:
             return resubmitted
+
+    if tax_id is not None:
+        # After the case write, so a submission refused above never replaces the number on file.
+        kind, digits = tax_id
+        ddb.update_item(
+            TableName=table,
+            Key=tin_key,
+            UpdateExpression="SET taxId = :taxId, kind = :kind, last4 = :last4, recordedAt = :at",
+            ExpressionAttributeValues={":taxId": {"S": digits}, ":kind": {"S": kind},
+                                       ":last4": {"S": digits[-4:]}, ":at": {"S": now}},
+        )
 
     _enqueue(boto3, applicant_id, event_id)
     LOG.info("applicant enqueued applicantId=%s jurisdiction=%s", applicant_id, jurisdiction)
@@ -351,6 +376,40 @@ _DECLARED_FIELDS = ("givenNames", "surname", "dateOfBirth", "nationality", "addr
 
 #: Ceiling per field, for the same reason. Long enough for a real compound name or address.
 _DECLARED_MAX_LEN = 256
+
+#: CIP (31 CFR 1020.220(a)(2)(i)(A)(4)): a U.S. person gives a taxpayer identification number. It
+#: is kept on its own item, never on the case: the state machines read the whole case item, and
+#: Step Functions keeps what they read in execution history for 90 days, where Backstage shows it.
+#: Nothing in the pipeline needs the number; a reviewer sees its last four digits.
+TIN_SORT_KEY = "TIN"
+
+#: ITIN group numbers (the fourth and fifth digits), per the IRS. An ITIN always starts with 9;
+#: an SSN never does.
+_ITIN_GROUPS = frozenset(
+    [*range(50, 66), *range(70, 89), *range(90, 93), *range(94, 100)])
+
+
+def _tax_id(raw: Any) -> tuple[str, str] | None:
+    """`(kind, digits)` for a well-formed SSN or ITIN, or None.
+
+    Format only. Whether the number belongs to this person is a question for SSA's consent-based
+    verification service (eCBSV), which this demo does not call.
+    """
+    digits = re.sub(r"[\s-]", "", str(raw or ""))
+    if len(digits) != 9 or not digits.isdigit():
+        return None
+    area, group, serial = digits[:3], int(digits[3:5]), digits[5:]
+    if area.startswith("9"):
+        return ("ITIN", digits) if group in _ITIN_GROUPS else None
+    if area in ("000", "666") or group == 0 or serial == "0000":
+        return None
+    return "SSN", digits
+
+
+def _tax_id_required(jurisdiction: str, declared: Mapping[str, Any]) -> bool:
+    """A U.S. national applying to the U.S. entity. A foreign national may give a passport number
+    instead (1020.220(a)(2)(i)(A)(4)(ii)), and the passport is already on the case."""
+    return jurisdiction == "us" and str(declared.get("nationality") or "").strip().upper() == "USA"
 
 
 def _declared_identity_attr(declared: Any) -> dict[str, Any]:

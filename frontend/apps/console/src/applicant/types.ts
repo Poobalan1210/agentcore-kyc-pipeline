@@ -44,6 +44,9 @@ export interface DeclaredIdentity {
   dateOfBirth: string; // ISO yyyy-mm-dd
   nationality: string; // ISO 3166-1 alpha-3, as printed in the MRZ
   address: string;
+  /** SSN or ITIN (`taxId.ts`). Sent once with the application and never kept in the browser:
+   * `live/applications.ts` drops it before saving a tab. */
+  taxId?: string;
 }
 
 export interface DocumentDraft {

@@ -155,6 +155,8 @@ export interface DeclaredIdentityPayload {
   dateOfBirth: string;
   nationality: string;
   address: string;
+  /** SSN or ITIN. Stored apart from the case; only its last four digits are ever returned. */
+  taxId?: string;
 }
 
 // -------------------------------------------------------------------------------- account
@@ -265,6 +267,8 @@ export interface ApplicantTrace {
   createdAt: string | null;
   documents: DocumentSummary[];
   declaredIdentity: Record<string, string> | null;
+  /** The last four digits of the SSN or ITIN on file, or null when none was given. */
+  taxIdLast4: string | null;
   liveness: LivenessSummary | null;
   livenessFailures: number | null;
   previousAttempts: number;

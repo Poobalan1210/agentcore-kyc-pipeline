@@ -82,7 +82,16 @@ export function loadTabs(): { tabs: ApplicationTab[]; activeId: string } {
 }
 
 export function saveTabs(tabs: ApplicationTab[], activeId: string): void {
-  const submitted = tabs.filter((t) => t.resume).slice(-MAX_SAVED);
+  // The SSN or ITIN never reaches local storage. A step-up resubmitted from a reloaded tab goes
+  // without it, and the API keeps the one already on file.
+  const submitted = tabs
+    .filter((t) => t.resume)
+    .slice(-MAX_SAVED)
+    .map((t) => {
+      const declared = t.resume?.declaredIdentity;
+      if (!t.resume || !declared?.taxId) return t;
+      return { ...t, resume: { ...t.resume, declaredIdentity: { ...declared, taxId: undefined } } };
+    });
   try {
     window.localStorage.setItem(
       STORAGE_KEY,

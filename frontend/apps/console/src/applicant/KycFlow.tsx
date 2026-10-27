@@ -184,6 +184,7 @@ export function KycFlow({
   if (step === "details" && selection) {
     return (
       <DetailsStep
+        jurisdiction={selection.jurisdiction}
         initial={declaredIdentity ?? prefilled?.identity ?? null}
         onBack={() => setStep("intake")}
         onContinue={(identity) => {

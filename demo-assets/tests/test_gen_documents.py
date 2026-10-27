@@ -269,6 +269,12 @@ def test_the_applicant_apps_personas_match_the_documents():
         assert persona["nationality"] == identity.mrz_country, identity.persona_id
         assert persona["address"] == identity.address, identity.persona_id
         assert persona["scenario"] == identity.scenario, identity.persona_id
+        # A U.S. persona fills the SSN/ITIN field (CIP), and only ever from SSA's range for
+        # advertisements, 987-65-4320 to 987-65-4329, which is never issued to anyone.
+        if identity.jurisdiction == "us":
+            assert re.fullmatch(r"987-65-432\d", persona.get("taxId", "")), identity.persona_id
+        else:
+            assert "taxId" not in persona, identity.persona_id
         # The file `write_all` produces for this persona, so the picker names the right upload.
         assert persona["documentFile"] == (
             f"{identity.persona_id.lower()}-{identity.document_type.lower()}.jpg")

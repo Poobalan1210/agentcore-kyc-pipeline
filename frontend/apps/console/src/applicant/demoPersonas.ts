@@ -15,6 +15,11 @@ import { DeclaredIdentity } from "./types";
  *
  * Every field stays editable on purpose: changing the date of birth to a wrong value is how the
  * mismatch-detection path gets demonstrated.
+ *
+ * The U.S. personas' `taxId`s are from 987-65-4320 to 987-65-4329, the range SSA reserves for
+ * advertisements and never issues, so no persona carries a real person's number. They read as
+ * ITINs to the format check (an SSN never starts with 9), which is why every screen says "SSN or
+ * ITIN" rather than guessing which.
  */
 export interface DemoPersona extends DeclaredIdentity {
   id: string;
@@ -39,6 +44,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
     dateOfBirth: "1991-05-14",
     nationality: "USA",
     address: "482 Kestrel Way, Austin, TX 78701, USA",
+    taxId: "987-65-4320",
   },
   {
     id: "DEMO-US-02",
@@ -51,6 +57,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
     dateOfBirth: "1990-03-22",
     nationality: "USA",
     address: "1150 Larkspur Avenue, Denver, CO 80203, USA",
+    taxId: "987-65-4321",
   },
   {
     id: "DEMO-US-03",
@@ -63,6 +70,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
     dateOfBirth: "1987-02-11",
     nationality: "USA",
     address: "77 Harbor View Drive, Seattle, WA 98101, USA",
+    taxId: "987-65-4322",
   },
   {
     id: "DEMO-US-04",
@@ -75,6 +83,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
     dateOfBirth: "1994-10-05",
     nationality: "USA",
     address: "2209 Birchwood Lane, Chicago, IL 60614, USA",
+    taxId: "987-65-4323",
   },
   {
     id: "DEMO-UK-01",
@@ -129,8 +138,8 @@ export function personaById(id: string | null | undefined): DemoPersona | undefi
 /** Just the declared fields, so a persona's demo metadata never reaches the API. */
 export function identityOf(persona: DemoPersona | undefined): DeclaredIdentity {
   if (!persona) return { ...BLANK_IDENTITY };
-  const { givenNames, surname, dateOfBirth, nationality, address } = persona;
-  return { givenNames, surname, dateOfBirth, nationality, address };
+  const { givenNames, surname, dateOfBirth, nationality, address, taxId } = persona;
+  return { givenNames, surname, dateOfBirth, nationality, address, taxId };
 }
 
 /** The API's document type for a persona, read from its generated file's name
